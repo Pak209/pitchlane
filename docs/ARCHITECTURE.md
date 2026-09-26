@@ -25,7 +25,7 @@ pitchlane/
 │   │   ├── StateCodec          ValueTree/XML state (parameters + embedded notes + source path)
 │   │   └── Params              parameter layout (APVTS)
 │   └── tests/PluginTests.cpp   headless tests of the real processor (pass-through, state, frames, analysis)
-├── ci/macos-au.yml          macOS CI (universal AU build, auval, artifact). Move to .github/workflows/ to enable, see ci/README.md
+├── .github/workflows/macos-au.yml  macOS CI (universal AU build, auval, artifact), see ci/README.md
 └── docs/
 ```
 
