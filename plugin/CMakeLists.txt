@@ -96,7 +96,8 @@ if(PITCHLANE_BUILD_TESTS)
     target_sources(PitchLaneTests PRIVATE tests/PluginTests.cpp)
     target_compile_definitions(PitchLaneTests PRIVATE
         JucePlugin_Name="Pitch Lane"
-        PITCHLANE_TESTS=1)
+        PITCHLANE_TESTS=1
+        PITCHLANE_TEST_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
     target_link_libraries(PitchLaneTests PRIVATE
         PitchLaneShared
         juce::juce_recommended_config_flags

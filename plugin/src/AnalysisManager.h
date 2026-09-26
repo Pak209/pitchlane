@@ -14,6 +14,27 @@
 
 namespace pitchlane {
 
+/** Decoded audio mixed to mono (all channels averaged), at the file's own sample rate. */
+struct DecodedAudio
+{
+    std::vector<float> mono;
+    double sampleRate = 0.0;
+    int numChannels = 0;
+    juce::String formatName;
+    juce::String error;       // empty on success
+    bool cancelled = false;
+    bool ok() const noexcept { return error.isEmpty() && !cancelled && !mono.empty(); }
+};
+
+/** Decodes any file `formats` can read. `progress(fraction)` is called per chunk and returns
+    false to cancel. Distinguishes missing files, unsupported types and damaged files in
+    `error`. Runs on any non-audio thread. */
+DecodedAudio decodeToMono(juce::AudioFormatManager& formats, const juce::File& file, double maxSeconds,
+                          const std::function<bool(float)>& progress = {});
+
+/** "WAV, AIFF, FLAC, ..." for messages. */
+juce::String supportedFormatsText(juce::AudioFormatManager& formats);
+
 class AnalysisManager : private juce::Thread, private juce::AsyncUpdater
 {
 public:
@@ -46,6 +67,8 @@ public:
     bool canOpen(const juce::File& f) const;
 
     static constexpr double kMaxSeconds = 20.0 * 60.0;
+
+    juce::AudioFormatManager& getFormats() noexcept { return formats_; }
 
 private:
     void run() override;

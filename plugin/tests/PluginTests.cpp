@@ -666,3 +666,215 @@ TEST_CASE("Plugin: host tempo map (tempo + signature changes) and manual time si
     CHECK_NEAR(follower.map().timeOfBar(2), 6 * 0.375, 1e-6);   // 6 eighths at 80 bpm = 2.25 s
     proc.setPlayHead(nullptr);
 }
+
+namespace {
+const std::vector<testsig::MelodyNote> kFormatMelody = { { 0.2, 0.4, 60 }, { 0.8, 0.4, 64 }, { 1.4, 0.6, 67 } };
+
+// Stereo: left = melody, right = melody at half level (mono mix = 0.75 x melody).
+bool writeStereo(juce::AudioFormat& fmt, const juce::File& f, double sr, int bits, const std::vector<float>& audio)
+{
+    f.deleteFile();
+    std::unique_ptr<juce::OutputStream> os = f.createOutputStream();
+    if (os == nullptr) return false;
+    auto writer = fmt.createWriterFor(os, juce::AudioFormatWriterOptions {}.withSampleRate(sr).withNumChannels(2).withBitsPerSample(bits));
+    if (writer == nullptr) return false;
+    juce::AudioBuffer<float> b(2, static_cast<int>(audio.size()));
+    for (int i = 0; i < b.getNumSamples(); ++i)
+    {
+        b.setSample(0, i, audio[static_cast<size_t>(i)]);
+        b.setSample(1, i, 0.5f * audio[static_cast<size_t>(i)]);
+    }
+    return writer->writeFromAudioSampleBuffer(b, 0, b.getNumSamples());
+}
+
+// Decodes, analyzes with the default settings and checks the three melody notes.
+void checkDecodesMelody(const juce::File& f, double expectedSr, double onsetTol, bool expectStereo)
+{
+    juce::AudioFormatManager fm;
+    fm.registerBasicFormats();
+    INFO(f.getFileName());
+    const auto d = decodeToMono(fm, f, 60.0);
+    INFO("error: " << d.error);
+    CHECK(d.ok());
+    if (!d.ok()) return;
+    CHECK_NEAR(d.sampleRate, expectedSr, 1e-6);
+    CHECK(std::abs(static_cast<double>(d.mono.size()) / d.sampleRate - 2.2) < 0.1);
+    if (expectStereo) CHECK_EQ(d.numChannels, 2);
+    const auto ar = analyzeMonophonic(d.mono.data(), d.mono.size(), d.sampleRate, {});
+    int matched = 0;
+    for (const auto& t : kFormatMelody)
+        for (const auto& n : ar.notes)
+            if (!n.muted() && n.pitch == t.midi && std::abs(n.start - t.start) < onsetTol) { ++matched; break; }
+    INFO("notes: " << ar.notes.size());
+    CHECK_EQ(matched, 3);
+}
+
+#if JUCE_MAC
+bool runTool(const juce::StringArray& args)
+{
+    juce::ChildProcess p;
+    if (!p.start(args)) return false;
+    if (!p.waitForProcessToFinish(60000)) { p.kill(); return false; }
+    return p.getExitCode() == 0;
+}
+#endif
+} // namespace
+
+TEST_CASE("Formats: WAV / AIFF / FLAC at several sample rates, stereo mixed to mono")
+{
+    for (const double sr : { 22050.0, 44100.0, 48000.0, 96000.0 })
+    {
+        const auto audio = testsig::melody(sr, 2.2, kFormatMelody);
+        juce::WavAudioFormat wav;
+        juce::AiffAudioFormat aiff;
+        juce::FlacAudioFormat flac;
+        struct F { juce::AudioFormat* fmt; const char* ext; int bits; };
+        for (const auto& f : { F { &wav, ".wav", 24 }, F { &wav, ".wav", 16 }, F { &aiff, ".aiff", 16 }, F { &flac, ".flac", 24 } })
+        {
+            if (sr > 48000.0 && f.fmt == &flac) continue;   // JUCE's FLAC writer: <= 48 kHz is enough here
+            auto file = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                            .getChildFile("pl-fmt-" + juce::String(static_cast<int>(sr)) + "-" + juce::String(f.bits) + f.ext);
+            CHECK(writeStereo(*f.fmt, file, sr, f.bits, audio));
+            checkDecodesMelody(file, sr, 0.05, true);
+            if (f.bits == 24 && f.fmt == &wav)
+            {
+                juce::AudioFormatManager fm;
+                fm.registerBasicFormats();
+                const auto d = decodeToMono(fm, file, 60.0);
+                double maxErr = 0.0;
+                for (size_t i = 0; i < d.mono.size() && i < audio.size(); ++i)
+                    maxErr = std::max(maxErr, std::abs(static_cast<double>(d.mono[i]) - 0.75 * audio[i]));
+                CHECK(maxErr < 1e-4);                      // channels averaged
+            }
+            file.deleteFile();
+        }
+    }
+}
+
+TEST_CASE("Formats: MP3 fixture (synthetic, committed)")
+{
+    const juce::File mp3(juce::String(PITCHLANE_TEST_FIXTURES) + "/melody-c-e-g.mp3");
+    CHECK(mp3.existsAsFile());
+    AnalysisManager am;
+    CHECK(am.canOpen(mp3));
+    checkDecodesMelody(mp3, 44100.0, 0.07, false);   // encoder delay ~25 ms
+}
+
+TEST_CASE("Formats: unsupported, missing and damaged files give clear errors")
+{
+    juce::AudioFormatManager fm;
+    fm.registerBasicFormats();
+    const auto tmp = juce::File::getSpecialLocation(juce::File::tempDirectory);
+
+    const auto missing = decodeToMono(fm, tmp.getChildFile("pl-does-not-exist.wav"), 60.0);
+    CHECK(missing.error.startsWith("File not found"));
+
+    auto odd = tmp.getChildFile("pl-notes.xyz");
+    odd.replaceWithText("not audio");
+    const auto unsupported = decodeToMono(fm, odd, 60.0);
+    INFO(unsupported.error);
+    CHECK(unsupported.error.startsWith("Unsupported file type"));
+    CHECK(unsupported.error.contains("WAV"));
+    odd.deleteFile();
+
+    for (const char* ext : { ".wav", ".aiff", ".flac", ".mp3" })
+    {
+        auto bad = tmp.getChildFile(juce::String("pl-damaged") + ext);
+        juce::MemoryBlock junk;
+        std::mt19937 rng(7);
+        for (int i = 0; i < 20000; ++i) { const auto c = static_cast<char>(rng() & 0xff); junk.append(&c, 1); }
+        bad.replaceWithData(junk.getData(), junk.getSize());
+        const auto d = decodeToMono(fm, bad, 60.0);
+        INFO(ext << ": " << d.error);
+        CHECK(!d.ok());
+        CHECK(d.error.contains("damaged") || d.error.contains("no audio"));
+        bad.deleteFile();
+    }
+
+#if ! JUCE_MAC
+    // Without Core Audio (Linux/Windows builds) AAC is not decodable: say so plainly.
+    auto m4a = tmp.getChildFile("pl-fake.m4a");
+    m4a.replaceWithText("x");
+    const auto aac = decodeToMono(fm, m4a, 60.0);
+    CHECK(aac.error.startsWith("Unsupported file type"));
+    m4a.deleteFile();
+#endif
+
+    // Through AnalysisManager the message reaches the status line.
+    auto bad = tmp.getChildFile("pl-damaged2.wav");
+    bad.replaceWithText("RIFF but not really a wave file at all");
+    AnalysisManager am;
+    CHECK(am.start(bad));
+    for (int i = 0; i < 500 && am.isRunning(); ++i) juce::Thread::sleep(10);
+    CHECK(am.getStatus() == AnalysisManager::Status::Failed);
+    CHECK(am.getStatusText().contains("damaged"));
+    bad.deleteFile();
+}
+
+TEST_CASE("Formats: long file is cancelled promptly while decoding and while analyzing")
+{
+    const double sr = 22050.0;
+    const auto tone = testsig::steady(sr, 30.0, 62, 4);
+    auto longFile = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("pl-long-16min.wav");
+    {
+        longFile.deleteFile();
+        juce::WavAudioFormat wav;
+        std::unique_ptr<juce::OutputStream> os = longFile.createOutputStream();
+        auto writer = wav.createWriterFor(os, juce::AudioFormatWriterOptions {}.withSampleRate(sr).withNumChannels(2).withBitsPerSample(16));
+        CHECK(writer != nullptr);
+        juce::AudioBuffer<float> b(2, static_cast<int>(tone.size()));
+        for (int ch = 0; ch < 2; ++ch) b.copyFrom(ch, 0, tone.data(), b.getNumSamples());
+        for (int k = 0; k < 32; ++k) writer->writeFromAudioSampleBuffer(b, 0, b.getNumSamples());   // 16 minutes
+    }
+    for (const bool duringAnalysis : { false, true })
+    {
+        AnalysisManager am;
+        CHECK(am.start(longFile));
+        const auto wanted = duringAnalysis ? AnalysisManager::Status::Analyzing : AnalysisManager::Status::Decoding;
+        for (int i = 0; i < 3000 && am.getStatus() != wanted; ++i) juce::Thread::sleep(1);
+        if (duringAnalysis) juce::Thread::sleep(50);
+        CHECK(am.getStatus() == wanted);
+        const auto t0 = juce::Time::getMillisecondCounterHiRes();
+        am.cancel();
+        for (int i = 0; i < 2000 && am.isRunning(); ++i) juce::Thread::sleep(1);
+        const double ms = juce::Time::getMillisecondCounterHiRes() - t0;
+        INFO((duringAnalysis ? "analyzing" : "decoding") << " cancel took " << ms << " ms");
+        CHECK(!am.isRunning());
+        CHECK(am.getStatus() == AnalysisManager::Status::Cancelled);
+        CHECK(ms < 500.0);
+    }
+    longFile.deleteFile();
+}
+
+#if JUCE_MAC
+TEST_CASE("Formats (macOS): M4A/AAC, M4A/ALAC, CAF and AIFF made with afconvert decode via Core Audio")
+{
+    // Synthetic audio only (never user recordings).
+    const auto tmp = juce::File::getSpecialLocation(juce::File::tempDirectory);
+    const auto src = tmp.getChildFile("pl-afconvert-src.wav");
+    const auto audio = testsig::melody(44100.0, 2.2, kFormatMelody);
+    juce::WavAudioFormat wav;
+    CHECK(writeStereo(wav, src, 44100.0, 16, audio));
+    struct Conv { const char* name; const char* file; const char* type; const char* data; double sr; };
+    const Conv convs[] = {
+        { "AAC in M4A", "pl-aac.m4a", "m4af", "aac", 44100.0 },
+        { "AAC in M4A @48k", "pl-aac48.m4a", "m4af", "aac@48000", 48000.0 },
+        { "ALAC in M4A", "pl-alac.m4a", "m4af", "alac", 44100.0 },
+        { "AAC in CAF", "pl-aac.caf", "caff", "aac", 44100.0 },
+        { "AIFF (afconvert)", "pl-afc.aiff", "AIFF", "BEI16", 44100.0 },
+    };
+    AnalysisManager am;
+    for (const auto& c : convs)
+    {
+        INFO(c.name);
+        const auto out = tmp.getChildFile(c.file);
+        out.deleteFile();
+        CHECK(runTool({ "/usr/bin/afconvert", "-f", c.type, "-d", c.data, src.getFullPathName(), out.getFullPathName() }));
+        CHECK(out.existsAsFile());
+        CHECK(am.canOpen(out));
+        checkDecodesMelody(out, c.sr, 0.07, true);   // AAC priming ~2112 samples is trimmed by Core Audio
+        out.deleteFile();
+    }
+    src.deleteFile();
+}
+#endif
