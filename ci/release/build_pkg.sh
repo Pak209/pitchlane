@@ -12,14 +12,24 @@ rm -rf "$work"; mkdir -p "$work/root" "$work/pkgs" "$(dirname "$out")"
 
 ditto "$comp" "$work/root/PitchLane.component"   # ditto keeps the signature and xattrs intact
 
-# Never let Installer "relocate" the update into some other copy of the bundle it finds.
-pkgbuild --analyze --root "$work/root" "$work/components.plist"
-i=0
-while /usr/libexec/PlistBuddy -c "Set :$i:BundleIsRelocatable false" "$work/components.plist" 2>/dev/null; do
-    i=$((i + 1))
-done
-[ "$i" -ge 1 ] || { err "pkgbuild --analyze found no bundle in the payload"; exit 1; }
-echo "Marked $i bundle(s) non-relocatable"
+# Component property list written explicitly (not via pkgbuild --analyze): never let Installer
+# "relocate" the update into some other copy of the bundle it finds elsewhere on the disk.
+cat > "$work/components.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<array>
+    <dict>
+        <key>BundleHasStrictIdentifier</key><true/>
+        <key>BundleIsRelocatable</key><false/>
+        <key>BundleIsVersionChecked</key><false/>
+        <key>BundleOverwriteAction</key><string>upgrade</string>
+        <key>RootRelativeBundlePath</key><string>PitchLane.component</string>
+    </dict>
+</array>
+</plist>
+PLIST
+plutil -lint "$work/components.plist"
 
 pkgbuild --root "$work/root" \
     --component-plist "$work/components.plist" \
