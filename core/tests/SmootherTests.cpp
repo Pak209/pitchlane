@@ -121,3 +121,35 @@ TEST_CASE("Smoother: slide is tracked with small lag")
         }
     CHECK(mono);
 }
+
+TEST_CASE("Smoother: smoothing amount mapping (60 % = original tuning, monotonic, 0 = raw)")
+{
+    const auto def = smoothingForAmount(0.6);
+    CHECK_EQ(def.medianLength, 5);
+    CHECK_NEAR(def.timeConstantMs, 10.0, 0.5);
+    const auto raw = smoothingForAmount(0.0);
+    CHECK_EQ(raw.medianLength, 1);
+    CHECK_NEAR(raw.timeConstantMs, 0.0, 1e-9);
+    const auto maxS = smoothingForAmount(1.0);
+    CHECK_EQ(maxS.medianLength, 7);
+    CHECK_NEAR(maxS.timeConstantMs, 25.0, 1e-9);
+    double prevTau = -1.0;
+    int prevMed = 0;
+    bool monotonic = true;
+    for (int i = 0; i <= 100; ++i)
+    {
+        const auto s = smoothingForAmount(i / 100.0);
+        if (s.timeConstantMs < prevTau || s.medianLength < prevMed) monotonic = false;
+        prevTau = s.timeConstantMs;
+        prevMed = s.medianLength;
+    }
+    CHECK(monotonic);
+    CHECK_EQ(smoothingForAmount(-3.0).medianLength, 1);   // clamped
+    CHECK_EQ(smoothingForAmount(7.0).medianLength, 7);
+
+    // amount 0: the smoother passes the detector output straight through.
+    PitchSmoother sm;
+    sm.configure(0.005, raw.medianLength, raw.timeConstantMs);
+    CHECK_NEAR(sm.process(true, 60.0f), 60.0f, 1e-6);
+    CHECK_NEAR(sm.process(true, 60.3f), 60.3f, 1e-6);
+}

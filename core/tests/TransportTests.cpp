@@ -143,3 +143,19 @@ TEST_CASE("Transport: small host jitter is not a seek")
     auto st = tm.update(playingAt(10.0 + blk + 0.0005), 512);
     CHECK(!st.jumped);
 }
+
+#include "pitchlane/SpscRing.h"
+
+TEST_CASE("SeqLockValue: reads T{} before the first store")
+{
+    struct Snap { double bpm = 120.0; int source = 2; float x = 0.5f; };
+    SeqLockValue<Snap> v;
+    const Snap a = v.load();
+    CHECK_NEAR(a.bpm, 120.0, 0.0);
+    CHECK(a.source == 2);
+    CHECK_NEAR(a.x, 0.5, 0.0);
+    Snap b; b.bpm = 90.0; b.source = 0;
+    v.store(b);
+    CHECK_NEAR(v.load().bpm, 90.0, 0.0);
+    CHECK(v.load().source == 0);
+}

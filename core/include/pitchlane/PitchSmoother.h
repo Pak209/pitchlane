@@ -13,6 +13,16 @@
 
 namespace pitchlane {
 
+/** Median length / time constant for a user-facing "smoothing amount" in [0, 1].
+    0.6 (the default, "60 %") gives the original tuning: median 5, tau 10 ms.
+    0 = raw detector output (no median, no low-pass); 1 = median 7, tau 25 ms. */
+struct SmoothingSettings
+{
+    int medianLength = 5;
+    double timeConstantMs = 10.0;
+};
+SmoothingSettings smoothingForAmount(double amount01) noexcept;
+
 class PitchSmoother
 {
 public:

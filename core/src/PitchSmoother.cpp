@@ -5,6 +5,15 @@
 
 namespace pitchlane {
 
+SmoothingSettings smoothingForAmount(double a) noexcept
+{
+    a = std::clamp(a, 0.0, 1.0);
+    SmoothingSettings s;
+    s.medianLength = a < 0.05 ? 1 : a < 0.35 ? 3 : a < 0.85 ? 5 : 7;
+    s.timeConstantMs = 25.0 * std::pow(a, 1.8); // 0.6 -> ~10 ms
+    return s;
+}
+
 void PitchSmoother::configure(double hopSeconds, int medianLength, double timeConstantMs, double jumpCents) noexcept
 {
     medianLen_ = std::clamp(medianLength | 1, 1, kMaxMedian);

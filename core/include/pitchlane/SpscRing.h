@@ -57,6 +57,10 @@ class SeqLockValue
     static_assert(std::is_trivially_copyable<T>::value, "T must be trivially copyable");
 
 public:
+    /** Starts out holding a value-initialised T (so default member initialisers apply),
+        not all-zero bytes: a reader before the first store() sees T{}. */
+    SeqLockValue() noexcept { copyIn(T {}); }
+
     void store(const T& v) noexcept
     {
         const unsigned s = seq_.load(std::memory_order_relaxed);
