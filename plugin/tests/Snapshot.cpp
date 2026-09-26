@@ -104,7 +104,15 @@ int main(int argc, char** argv)
     };
     NoteList ref;
     for (auto& n : melody) ref.push_back({ bar(n.b0), bar(n.b1) - bar(n.b0), n.pitch });
-    proc.getReference().setNotes(ref, false);
+    {
+        // TEST DATA: a muted harmony note (a third below the long A4), as Analyze Vocal flags them.
+        RefNote h { bar(17.0), bar(17.74) - bar(17.0), 65, 0.6f, 70 };
+        h.setFlag(RefNote::HarmonySuspect, true);
+        h.setFlag(RefNote::Muted, true);
+        auto withHarmony = ref;
+        withHarmony.push_back(h);
+        proc.getReference().setNotes(withHarmony, false);
+    }
     const auto demoDir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("pitchlane-demo");
     demoDir.createDirectory();
     const auto stem = demoDir.getChildFile("Lead Vocal Stem.wav");
