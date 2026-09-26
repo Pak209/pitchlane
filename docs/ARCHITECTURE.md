@@ -12,8 +12,11 @@ pitchlane/
 │   │   ├── SpscRing.h          lock-free SPSC ring + seqlock (audio -> UI)
 │   │   ├── Transport.h         host playhead -> song seconds, seek/loop/stop/record detection, free-run fallback
 │   │   ├── ReferenceNotes.h    target note model + lookup + clean-up helpers
-│   │   ├── OfflineAnalyzer.h   "Analyze Vocal": pYIN-style candidates + HMM/Viterbi + note segmentation
-│   │   └── MidiFile.h          dependency-free SMF reader/writer (tempo maps, running status, SMPTE)
+│   │   ├── OfflineAnalyzer.h   "Analyze Vocal": pYIN-style candidates + HMM/Viterbi + note segmentation, harmony suspects
+│   │   ├── TempoMap.h          host tempo / time-signature changes learned from ppq + bar-start observations; bar/beat maths
+│   │   ├── TakeScorer.h        per-note take feedback: early / on time / late, sharp / flat, drift, missed; take summary
+│   │   └── MidiFile.h          dependency-free SMF reader/writer (tempo maps, running status, SMPTE); skips muted notes
+│   ├── tools/                  pitchlane_analyze (WAV -> .mid/.csv, JSON summary) + plot_analysis.py (dev only)
 │   └── tests/                  pitchlane_core_tests (own tiny test harness, no deps)
 ├── plugin/                  JUCE 8 plugin (AU + Standalone; VST3 behind PITCHLANE_VST3)
 │   ├── src/
@@ -23,10 +26,10 @@ pitchlane/
 │   │   ├── LiveNotePanel       LIVE NOTE readout, cents meter, confidence bar
 │   │   ├── SettingsPanel       gear popover: secondary settings + every edit command
 │   │   ├── Widgets / Theme     styled controls, LookAndFeel, embedded Inter font, icons
-│   │   ├── UiModel             pure UI logic (gesture mapping, bar maths, pitch window, labels), unit-tested
+│   │   ├── UiModel             pure UI logic (gestures, TempoFollower, pitch window, MIDI-import voices, labels), unit-tested
 │   │   ├── Markers             user section markers (saved in the plugin state)
 │   │   ├── ReferenceModel      notes + selection + undo (message thread, lock-protected)
-│   │   ├── AnalysisManager     background thread: decode audio file -> OfflineAnalyzer -> notes
+│   │   ├── AnalysisManager     background thread: decodeToMono (any format / rate, clear errors) -> OfflineAnalyzer -> notes
 │   │   ├── StateCodec          ValueTree/XML state (parameters + embedded notes + source path)
 │   │   └── Params              parameter layout (APVTS)
 │   └── tests/PluginTests.cpp   headless tests of the real processor (pass-through, state, frames, analysis)
@@ -79,8 +82,9 @@ pitchlane/
 
 ## Offline analyzer ("Analyze Vocal")
 
-1. Decode (JUCE `AudioFormatManager`: WAV/AIFF/FLAC/Ogg/MP3, plus M4A/AAC/CAF through Core Audio on macOS), mix to mono.
-   Limit: 20 min.
+1. Decode with `decodeToMono` (JUCE `AudioFormatManager`: WAV/AIFF/FLAC/Ogg/MP3 everywhere, plus M4A (AAC/ALAC) and
+   CAF through Core Audio on macOS), average all channels to mono at the file's own rate. Missing files, unsupported
+   types (the message lists what this build reads) and damaged files give distinct errors. Limit: 20 min.
 2. Filter and decimate to about 11–12 kHz. Frames: 30 ms window, 5 ms hop, centred timestamps.
 3. **pYIN-style candidates.** Every CMNDF local minimum is a candidate. Its probability comes from a Beta(2,18) prior
    over 100 YIN thresholds. Frames below max(−55 dBFS, loud-level − 40 dB) are unvoiced.
@@ -90,15 +94,45 @@ pitchlane/
    60 cents for at least 60 ms in one direction. Vibrato and scoops don't split a note. Note pitch = median of its frames.
 6. **Edges.** Onsets/offsets that border silence are refined from a 10 ms energy envelope (≤ 80 ms, −15 dB re
    note level), because voicing itself starts about half a window late.
-7. **Clean-up.** Merge same-pitch notes across gaps ≤ 60 ms. Drop notes < 80 ms or with mean voicing probability < 0.35.
+7. **Clean-up.** Merge same-pitch notes across gaps ≤ 60 ms. Drop notes < 80 ms or with mean voicing probability < 0.05
+   (kept down to 0.025 when the pitch is steady within 35 cents). The unvoiced HMM state pays the same per-frame cost
+   as voiced bins (`unvoicedWeight` 0.02); a spectral salience pass fixes period-multiple / sub-octave errors, and
+   1–3-frame spikes are removed.
+8. **Harmony suspects.** Short notes are flagged (and muted by default) when they are range outliers (≥ 9 st below /
+   ≥ 12 st above the local melody), quick excursions away from and back to the melody, mostly under/over a stronger
+   second voice, or short and barely voiced. Muted notes are grey, not scored, not exported.
+
+Real-vocal check (a 3-minute lead stem with stacked harmonies, not in the repo): the original defaults found 2 notes;
+the current defaults find 153 (29 flagged harmony suspects), 94 % of the active notes in the song's key, 2.4 s
+analysis. The limit is stacked voices: a monophonic tracker follows the most periodic voice, so which line is the lead
+can flip at the end of a phrase.
 
 Measured on the synthetic 8-note test melody (vibrato, legato, 150 ms note): all notes and pitches correct, onsets
 within 5 ms (20 ms for the legato transition), about 40 ms of CPU for 4.3 s of audio.
 
+## Tempo map (ruler and grid)
+
+`TransportSnapshot` carries the host's ppq and last-bar-start ppq. The editor's `ui::TempoFollower` feeds them into a
+`TempoMap`: an observation that disagrees with the current map (tempo, signature or bar phase) starts a new segment
+there and drops the stale future, so tempo and time-signature changes in Logic move the bars correctly once playback
+has passed them. Without a host timeline (Logic Sync off, Standalone) the map is constant at the manual BPM and the
+`timeSig` parameter. Bar numbering is anchored on Logic's bar starts.
+
+## Take feedback
+
+`TakeScorer` (message thread) gets the live frames that `PianoRoll` drains (raw detector pitch, calibrated song time).
+For each unmuted reference note, after it ends plus the timing tolerance, it finds the onset (the first 40 ms of
+continuous pitch within 100 cents of the target, nearer to it than to the previous note, searched from 300 ms early),
+classifies it Early / On time / Late against `timingTol` (default 80 ms), averages the cents over the sung part
+(Sharp / In tune / Flat against the tolerance), fits the drift across notes ≥ 0.3 s, or marks it Missed. A Jump
+(seek, loop wrap, play start) or any reference / offset / transpose / tolerance change starts a new take. The processor
+integration test measures about 7 ms of onset error on synthetic singing.
+
 ## State (saved in the Logic project)
 
 `getStateInformation` writes XML (via `copyXmlToBinary`):
-`<PitchLaneState version="1"><Params …APVTS…/><Reference sourcePath="…"><Note s l p c v/>…</Reference></PitchLaneState>`.
+`<PitchLaneState version="1"><Params …APVTS…/><Reference sourcePath="…"><Note s l p c v f/>…</Reference></PitchLaneState>`
+(`f` = flags: 1 muted, 2 harmony suspect; omitted when 0, so older projects load unchanged).
 The notes are embedded, so the source audio file is optional. If the stored path no longer exists, the UI shows
 "Source file missing: … (notes are saved in the project and still work)".
 

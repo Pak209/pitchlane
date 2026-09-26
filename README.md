@@ -112,10 +112,10 @@ In Logic the plug-in is under **Audio FX > Audio Units > Pak209 > Pitch Lane**.
 | **Reference:** field / folder | Choose the isolated lead-vocal stem (or drag an audio / MIDI file onto the window). Orange "(missing)" = the file moved; the notes are saved in the project and still work. |
 | **ANALYZE VOCAL** | Turns the stem into editable reference notes in the background. While it runs the button shows **CANCEL nn%**. |
 | **Key** | Key and scale (e.g. "A minor"): used by the *Scales* guide and the row shading. |
-| **BPM** | Shows Logic's tempo while *Logic Sync* is on. With sync off (or no host tempo) it is the manual tempo: drag, scroll, pick from the menu or double-click to type. |
+| **BPM** | Shows Logic's tempo while *Logic Sync* is on. With sync off (or no host tempo) it is the manual tempo: drag, scroll, pick from the menu or double-click to type. Its menu also sets the manual **time signature** (2/4 … 12/8). |
 | **LOGIC SYNC** | On (default): follow Logic's transport, position and tempo. Off: ignore the host and run a free clock at the manual BPM. |
 | Status dot | Green = synced to the host transport (brighter while playing), amber = sync on but the host sends no timeline, grey = sync off. |
-| ⚙ Settings | Note names (Middle C = C4 / C3 as in Logic), timing calibration, input gate, clarity, visible time, follow playhead, Import / Export MIDI, Undo / Redo, Select all, edit buttons for the selection (Delete, ±1 st, ±10 ms), Clear notes, section markers, Clear trace, Restart clock. |
+| ⚙ Settings | Note names (Middle C = C4 / C3 as in Logic), timing calibration, **timing tolerance** (on-time window, default ±80 ms), input gate, clarity, visible time, follow playhead, Import / Export MIDI, **Mute / Unmute harmonies**, **Remove muted**, Undo / Redo, Select all, edit buttons for the selection (Delete, Mute, ±1 st, ±10 ms), Clear notes, section markers, Clear trace, Restart clock. |
 
 **Bottom bar** (each title has an ⓘ tooltip): **Reference offset** (ms, moves the reference notes against the song; arrows
 10 ms, Shift 1 ms), **Transpose** (st), **Vocal range** (voice-type presets or lowest / highest note), **Tolerance** (±cents),
@@ -124,11 +124,24 @@ In Logic the plug-in is under **Audio FX > Audio Units > Pak209 > Pitch Lane**.
 smoothed; 60 % is the original tuning, 0 % is the raw detector output). Every value field also takes vertical drag, the
 mouse wheel and double-click-to-type.
 
-**Roll.** Bar numbers along the top (from the host tempo and time signature), the section-marker lane, the keyboard
+**Roll.** Bar numbers along the top (following Logic's tempo and time-signature changes), the section-marker lane, the keyboard
 (the target note is marked lavender, the sung note tinted), reference notes as lavender bars, and your live line in
 cyan. Where you are outside the tolerance on a note, the line and that part of the note turn orange-red (the first
 100 ms of each note are not judged, so scoops into a note aren't flagged). The loop region is shaded when Logic's
 Cycle is on. The view follows the playhead and zooms vertically to the current phrase inside the vocal range.
+Rows in the key are shaded faintly in *Notes* mode and strongly in *Scales* mode.
+
+**Take feedback.** After each reference note, a tick marks where you came in: **green** = on time (within the timing
+tolerance), **amber** = early, **orange** = late, with the offset in ms. A dashed outline marks a missed note, and an
+arrow at the end marks a note that drifted up or down. The left panel shows the last note (e.g. "Late +80 ms · 12¢
+sharp") and the take so far ("Take: 9/12 on time · 2 late · 1 missed"). A new take starts whenever you seek, the cycle
+wraps or playback starts.
+
+**Harmonies.** Grey notes are muted: they are not judged, not used for the live target and not exported. Analyze Vocal
+mutes notes it thinks belong to a harmony or backing line (amber outline). Importing a MIDI part with chords or
+harmonies asks whether to keep the lead only (top voice, or loudest / longest notes) or all voices with the harmonies
+muted. Mute / unmute selected notes with **M** or the right-click menu. *Mute harmonies* and *Remove muted* are in the
+right-click menu and in Settings.
 
 **Editing** (as labelled in the hint bar under the roll):
 - **Drag** a note to move it in time and pitch (all selected notes move together).
@@ -148,7 +161,10 @@ are no built-in sections.
 
 Notes, markers and settings are stored **inside the Logic project**.
 
-Colours: **cyan** = in tune (or no target at that moment), **orange-red** = outside the tolerance, **lavender** = reference notes.
+Colours: **cyan** = in tune (or no target at that moment), **orange-red** = outside the tolerance, **lavender** = reference notes, **grey** = muted notes.
+
+**Audio formats for Analyze Vocal:** WAV, AIFF, FLAC, Ogg and MP3, plus M4A (AAC / Apple Lossless) and CAF on macOS
+through Core Audio. Stereo files are mixed to mono. Any sample rate works. Files up to 20 minutes.
 
 ---
 

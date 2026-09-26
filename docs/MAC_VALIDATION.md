@@ -70,3 +70,34 @@ universal binary and passes `auval`. It says nothing about Logic's UI, transport
 - [ ] Section markers: add (double-click lane), rename, drag, right-click delete; saved with the project.
 - [ ] Smoothing knob visibly changes how calm the live line is (0 % = raw).
 - [ ] Close and reopen the plugin window during playback. The trace continues (up to about 40 s is kept while the window is closed).
+
+## 8. Tempo map, key shading, formats, feedback, harmonies (v0.3)
+Tempo and time signature:
+- [ ] In a project with a **tempo change** (e.g. 90 → 120 at bar 9), play through the change: the bar numbers and grid
+      line up with Logic's bars before and after it. Seek back before the change: still correct.
+- [ ] Project with a **time-signature change** (4/4 → 7/8 at bar 5): the bars after the change are 7/8 long and
+      numbered like Logic's.
+- [ ] Projects in 3/4 and 6/8 at 60, 104 and 174 bpm: bar 1 starts at Logic's bar 1 and the numbers match.
+- [ ] **Logic Sync** off: the BPM menu's *Time signature* submenu changes the grid (for example 6/8), saved with the project.
+- [ ] Key = B♭ major in *Notes* mode: in-key rows are faintly lighter and the tonic tinted; *Scales* mode is unchanged.
+
+Formats (Load Vocal / drag-drop → Analyze):
+- [ ] Analyze an **M4A (AAC)** voice memo, an Apple Lossless M4A, an MP3, a 96 kHz WAV and a stereo AIFF: each finishes
+      with a sensible note count.
+- [ ] Drop a renamed text file (`fake.wav`): the status shows "…looks damaged…". Drop a `.txt`: nothing happens (not
+      accepted). Cancel a 15-minute file during "Reading audio…" and during "Analyzing…": it stops within about a second.
+
+Take feedback:
+- [ ] Sing along with a reference, deliberately late on one note: that note gets an orange tick and "+xxx ms"; the left
+      panel says "Late +… ms". On-time notes get green ticks. Skip a note: dashed outline, counted as missed.
+- [ ] Change **Timing tolerance** in Settings (for example to 40 ms): the next take is judged against it.
+- [ ] Seek / cycle wrap / stop and play: the ticks reset and a new take summary starts.
+- [ ] With the **Timing calibration** set for your monitoring latency, on-time singing reads within about ±30 ms.
+
+Harmonies:
+- [ ] Import a MIDI part with two voices: the dialog offers *Lead only: top voice*, *Lead only: loudest / longest*,
+      *Keep all voices, harmonies muted*, *Keep all voices*. Each result looks right.
+- [ ] Analyze a stem with backing harmonies: suspected harmony notes are grey with an amber outline and are not judged.
+- [ ] Select notes and press **M** (and use the right-click menu): they grey out; again: unmute. *Mute/Unmute
+      harmonies* toggles all flagged notes; *Remove muted notes* deletes them; ⌘Z restores.
+- [ ] Export MIDI: muted notes are not in the file. Save, reopen the project: muted notes are still muted.
