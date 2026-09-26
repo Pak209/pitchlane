@@ -6,7 +6,8 @@ add_library(pitchlane_core STATIC
     src/ReferenceNotes.cpp
     src/OfflineAnalyzer.cpp
     src/MidiFile.cpp
-    src/Transport.cpp)
+    src/Transport.cpp
+    src/TempoMap.cpp)
 
 target_include_directories(pitchlane_core PUBLIC include)
 target_compile_features(pitchlane_core PUBLIC cxx_std_17)
@@ -28,7 +29,15 @@ if(PITCHLANE_BUILD_TESTS)
         tests/OfflineAnalyzerTests.cpp
         tests/MidiFileTests.cpp
         tests/TransportTests.cpp
+        tests/TempoMapTests.cpp
         tests/ReferenceNotesTests.cpp)
     target_link_libraries(pitchlane_core_tests PRIVATE pitchlane_core)
     add_test(NAME pitchlane_core_tests COMMAND pitchlane_core_tests)
+endif()
+
+# Developer tool: run the offline analyzer on a WAV file (not shipped).
+option(PITCHLANE_BUILD_TOOLS "Build developer command-line tools" ON)
+if(PITCHLANE_BUILD_TOOLS)
+    add_executable(pitchlane_analyze tools/AnalyzeCli.cpp tools/WavIO.h)
+    target_link_libraries(pitchlane_analyze PRIVATE pitchlane_core)
 endif()
