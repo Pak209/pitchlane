@@ -16,6 +16,8 @@ PitchLaneProcessor::PitchLaneProcessor()
     clarityParam_ = apvts_.getRawParameterValue(params::clarity);
     tempoParam_ = apvts_.getRawParameterValue(params::tempo);
     noteNamesParam_ = apvts_.getRawParameterValue(params::noteNames);
+    smoothingParam_ = apvts_.getRawParameterValue(params::smoothing);
+    hostSyncParam_ = apvts_.getRawParameterValue(params::hostSync);
 
     analysis_.onFinished = [this](const AnalysisManager::Result& r) {
         if (r.status == AnalysisManager::Status::Finished)
@@ -54,7 +56,8 @@ void PitchLaneProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     ds.gateDb = gateParam_->load();
     ds.maxAperiodicity = 1.f - clarityParam_->load();
     detector_.prepare(sampleRate_, ds);
-    smoother_.configure(detector_.hopSeconds());
+    appliedSmoothing_ = -1.f;
+    applySmoothing(smoothingParam_->load());
     transportMapper_.prepare(sampleRate_);
     transportMapper_.setManualBpm(tempoParam_->load());
     transportMapper_.setFreeRunWhenNoHost(true);
@@ -67,7 +70,16 @@ void PitchLaneProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
 void PitchLaneProcessor::releaseResources() {}
 
-HostPosition PitchLaneProcessor::readHost(juce::AudioPlayHead* ph)
+void PitchLaneProcessor::applySmoothing(float percent) noexcept
+{
+    // Real-time safe: PitchSmoother::configure only sets a few scalars (no allocation).
+    if (std::abs(percent - appliedSmoothing_) < 1e-4f) return;
+    appliedSmoothing_ = percent;
+    const auto s = smoothingForAmount(percent * 0.01);
+    smoother_.configure(detector_.hopSeconds(), s.medianLength, s.timeConstantMs);
+}
+
+HostPosition PitchLaneProcessor::readHost(juce::AudioPlayHead* ph, int& timeSigNum, int& timeSigDen)
 {
     HostPosition h;
     if (ph == nullptr) return h;
@@ -81,6 +93,11 @@ HostPosition PitchLaneProcessor::readHost(juce::AudioPlayHead* ph)
     h.isRecording = pos->getIsRecording();
     h.isLooping = pos->getIsLooping();
     if (auto lp = pos->getLoopPoints()) { h.hasLoop = true; h.loopStartPpq = lp->ppqStart; h.loopEndPpq = lp->ppqEnd; }
+    if (auto ts = pos->getTimeSignature(); ts && ts->numerator > 0 && ts->denominator > 0)
+    {
+        timeSigNum = ts->numerator;
+        timeSigDen = ts->denominator;
+    }
     // Some hosts report a valid position object but no time at all while stopped; that
     // is handled by TransportMapper (falls back to the free clock / manual tempo).
     return h;
@@ -100,8 +117,11 @@ void PitchLaneProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mi
     transportMapper_.setManualBpm(tempoParam_->load());
     detector_.setGateDb(gateParam_->load());
     detector_.setMaxAperiodicity(1.f - clarityParam_->load());
+    applySmoothing(smoothingParam_->load());
 
-    const auto host = readHost(getPlayHead());
+    // Logic Sync off: ignore the host timeline and tempo, run the free clock at the manual tempo.
+    const bool sync = hostSyncParam_->load() >= 0.5f;
+    const auto host = sync ? readHost(getPlayHead(), timeSigNum_, timeSigDen_) : HostPosition {};
     const auto st = transportMapper_.update(host, numSamples);
 
     if (st.jumped)
@@ -121,6 +141,8 @@ void PitchLaneProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mi
     snap.loopStart = st.loopStart;
     snap.loopEnd = st.loopEnd;
     snap.source = static_cast<int32_t>(st.source);
+    snap.timeSigNum = sync ? timeSigNum_ : 4;
+    snap.timeSigDen = sync ? timeSigDen_ : 4;
     snap.playing = st.playing;
     snap.recording = st.recording;
     snap.looping = st.looping;
@@ -188,12 +210,12 @@ juce::AudioProcessorEditor* PitchLaneProcessor::createEditor()
 
 void PitchLaneProcessor::getStateInformation(juce::MemoryBlock& destData)
 {
-    state::writeBinary(apvts_, reference_, destData);
+    state::writeBinary(apvts_, reference_, destData, &markers_);
 }
 
 void PitchLaneProcessor::setStateInformation(const void* data, int sizeInBytes)
 {
-    state::readBinary(data, sizeInBytes, apvts_, reference_);
+    state::readBinary(data, sizeInBytes, apvts_, reference_, &markers_);
 }
 
 } // namespace pitchlane

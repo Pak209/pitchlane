@@ -1,25 +1,18 @@
 #pragma once
+// Pitch Lane editor: header (logo, reference stem, Analyze Vocal, key, BPM, Logic Sync,
+// status, settings), LIVE NOTE panel, the roll, the gesture hint bar and the bottom
+// controls (reference offset, transpose, vocal range, tolerance, guide, display, smoothing).
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include "LiveNotePanel.h"
 #include "PianoRoll.h"
 #include "PluginProcessor.h"
+#include "Theme.h"
+#include "Widgets.h"
 
 namespace pitchlane {
-
-/** Big note / cents / flat-in tune-sharp readout with a cents meter. */
-class ReadoutDisplay : public juce::Component
-{
-public:
-    void setReadout(const Readout& r, OctaveConvention conv, float tolerance);
-    void paint(juce::Graphics& g) override;
-
-private:
-    Readout r_;
-    OctaveConvention conv_ = OctaveConvention::Scientific;
-    float tolerance_ = 10.f;
-};
 
 class PitchLaneEditor : public juce::AudioProcessorEditor,
                         public juce::FileDragAndDropTarget,
@@ -29,62 +22,72 @@ public:
     explicit PitchLaneEditor(PitchLaneProcessor&);
     ~PitchLaneEditor() override;
 
+    static constexpr int kDefaultW = 1240, kDefaultH = 720, kMinW = 1040, kMinH = 620;
+
     void paint(juce::Graphics&) override;
     void resized() override;
     bool keyPressed(const juce::KeyPress& key) override;
 
     bool isInterestedInFileDrag(const juce::StringArray& files) override;
+    void fileDragExit(const juce::StringArray&) override { dragHover_ = false; repaint(); }
     void filesDropped(const juce::StringArray& files, int x, int y) override;
 
-private:
-    struct LabeledSlider
-    {
-        juce::Label label;
-        juce::Slider slider;
-        std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> attachment;
-    };
-    struct LabeledCombo
-    {
-        juce::Label label;
-        juce::ComboBox combo;
-        std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> attachment;
-    };
+    PianoRoll& getRoll() noexcept { return roll_; }   // used by the snapshot tool
+    void showToast(const juce::String& message);
 
+    static constexpr const char* kHintText =
+        "Drag to adjust reference notes  \xc2\xb7  Option-drag to create  \xc2\xb7  Shift-drag to stretch  \xc2\xb7  Double-click to delete";
+
+private:
     void timerCallback() override;
-    void setupSlider(LabeledSlider& s, const char* paramId, const juce::String& label, juce::Slider::SliderStyle style);
-    void setupCombo(LabeledCombo& c, const char* paramId, const juce::String& label);
     void chooseVocalFile();
     void setPendingVocal(const juce::File& f);
     void startAnalysis();
     void importMidi();
     void importMidiFile(const juce::File& f);
     void exportMidi();
-    void updateSourceLabel();
+    void updateReferenceField();
+    void showSettings();
+    void setupBottomBar();
     static bool isMidiFile(const juce::File& f);
+    juce::RangedAudioParameter* param(const char* id) { return proc_.getApvts().getParameter(id); }
 
     PitchLaneProcessor& proc_;
+    theme::LookAndFeel laf_;
+    juce::TooltipWindow tooltips_ { this, 450 };
+
     PianoRoll roll_;
-    ReadoutDisplay readout_;
-    juce::Label transportLabel_;
+    LiveNotePanel live_;
 
-    LabeledCombo key_, scale_, names_;
-    LabeledSlider tempo_, low_, high_, tolerance_, calibration_, offset_, transpose_, gate_, clarity_, span_;
+    // header
+    ReferenceField refField_;
+    juce::TextButton analyzeBtn_ { "ANALYZE VOCAL" };
+    ValueField keyField_, bpmField_;
+    SyncButton syncBtn_;
+    std::unique_ptr<juce::ButtonParameterAttachment> syncAttachment_;
+    StatusDot statusDot_;
+    IconButton gearBtn_;
 
-    juce::TextButton loadVocalBtn_ { "Load Vocal..." }, analyzeBtn_ { "Analyze Vocal" }, cancelBtn_ { "Cancel" };
-    juce::TextButton importMidiBtn_ { "Import MIDI..." }, exportMidiBtn_ { "Export MIDI..." };
-    juce::TextButton deleteBtn_ { "Delete" }, upBtn_ { "+1 st" }, downBtn_ { "-1 st" };
-    juce::TextButton earlierBtn_ { "<< 10ms" }, laterBtn_ { "10ms >>" };
-    juce::TextButton undoBtn_ { "Undo" }, redoBtn_ { "Redo" }, clearNotesBtn_ { "Clear Notes" };
-    juce::TextButton clearTraceBtn_ { "Clear Trace" }, restartBtn_ { "Restart Clock" };
-    juce::ToggleButton followBtn_ { "Follow" };
-    double progress_ = 0.0;
-    juce::ProgressBar progressBar_ { progress_ };
-    juce::Label statusLabel_, sourceLabel_;
+    // hint bar
+    IconButton scrollLeft_, scrollRight_;
+    juce::TextButton selDown_, selUp_, selEarlier_, selLater_, selDelete_ { "Delete" };
+
+    // bottom bar
+    Caption offsetCap_, transposeCap_, rangeCap_, toleranceCap_, guideCap_, displayCap_, smoothingCap_;
+    ValueField offsetField_, transposeField_, rangeField_, toleranceField_;
+    SegmentedControl guideSeg_, displaySeg_;
+    juce::Slider smoothingKnob_;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> smoothingAttachment_;
+    juce::Rectangle<int> smoothingValueArea_, headerArea_, hintArea_, bottomArea_, keyLabelArea_, bpmLabelArea_;
 
     juce::File pendingVocal_;
     std::unique_ptr<juce::FileChooser> chooser_;
+    juce::String toast_, lastAnalysisStatus_;
+    double toastUntilMs_ = 0.0;
     int tick_ = 0;
     bool dragHover_ = false;
+    double progress_ = 0.0;
+    bool analysing_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PitchLaneEditor)
 };

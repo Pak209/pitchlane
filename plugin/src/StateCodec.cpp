@@ -52,7 +52,7 @@ NoteList notesFromTree(const ValueTree& ref)
     return notes;
 }
 
-ValueTree makeStateTree(AudioProcessorValueTreeState& apvts, const ReferenceModel& model)
+ValueTree makeStateTree(AudioProcessorValueTreeState& apvts, const ReferenceModel& model, const MarkerModel* markers)
 {
     ValueTree root(ids::root);
     root.setProperty(ids::version, kVersion, nullptr);
@@ -60,10 +60,11 @@ ValueTree makeStateTree(AudioProcessorValueTreeState& apvts, const ReferenceMode
     auto ref = notesToTree(model.getNotes());
     ref.setProperty(ids::sourcePath, model.getSourcePath(), nullptr);
     root.appendChild(ref, nullptr);
+    if (markers != nullptr) root.appendChild(markers->toTree(), nullptr);
     return root;
 }
 
-bool applyStateTree(const ValueTree& root, AudioProcessorValueTreeState& apvts, ReferenceModel& model)
+bool applyStateTree(const ValueTree& root, AudioProcessorValueTreeState& apvts, ReferenceModel& model, MarkerModel* markers)
 {
     if (!root.hasType(ids::root)) return false;
     const auto params = root.getChildWithName(apvts.state.getType());
@@ -74,19 +75,22 @@ bool applyStateTree(const ValueTree& root, AudioProcessorValueTreeState& apvts, 
         model.setNotes(notesFromTree(ref), false);
         model.setSourcePath(ref.getProperty(ids::sourcePath, String()).toString());
     }
+    if (markers != nullptr) markers->fromTree(root.getChildWithName(MarkerModel::treeType)); // v1 state: no markers
     return true;
 }
 
-void writeBinary(AudioProcessorValueTreeState& apvts, const ReferenceModel& model, MemoryBlock& dest)
+void writeBinary(AudioProcessorValueTreeState& apvts, const ReferenceModel& model, MemoryBlock& dest,
+                 const MarkerModel* markers)
 {
-    if (auto xml = makeStateTree(apvts, model).createXml())
+    if (auto xml = makeStateTree(apvts, model, markers).createXml())
         AudioProcessor::copyXmlToBinary(*xml, dest);
 }
 
-bool readBinary(const void* data, int size, AudioProcessorValueTreeState& apvts, ReferenceModel& model)
+bool readBinary(const void* data, int size, AudioProcessorValueTreeState& apvts, ReferenceModel& model,
+                MarkerModel* markers)
 {
     if (auto xml = AudioProcessor::getXmlFromBinary(data, size))
-        return applyStateTree(ValueTree::fromXml(*xml), apvts, model);
+        return applyStateTree(ValueTree::fromXml(*xml), apvts, model, markers);
     return false;
 }
 

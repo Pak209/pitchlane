@@ -48,7 +48,7 @@ AudioProcessorValueTreeState::ParameterLayout createLayout(std::function<int()> 
     layout.add(std::make_unique<AudioParameterInt>(ParameterID { lowNote, version }, "Range low", 24, 96, 48,
                                                    AudioParameterIntAttributes().withStringFromValueFunction(noteText)
                                                        .withValueFromStringFunction(noteFromText)));
-    layout.add(std::make_unique<AudioParameterInt>(ParameterID { highNote, version }, "Range high", 24, 108, 79,
+    layout.add(std::make_unique<AudioParameterInt>(ParameterID { highNote, version }, "Range high", 24, 108, 72,
                                                    AudioParameterIntAttributes().withStringFromValueFunction(noteText)
                                                        .withValueFromStringFunction(noteFromText)));
     layout.add(std::make_unique<AudioParameterFloat>(ParameterID { tempo, version }, "Manual tempo",
@@ -64,6 +64,16 @@ AudioProcessorValueTreeState::ParameterLayout createLayout(std::function<int()> 
     layout.add(std::make_unique<AudioParameterFloat>(ParameterID { viewSeconds, version }, "View span",
                                                      NormalisableRange<float>(2.f, 30.f, 0.5f), 8.f,
                                                      AudioParameterFloatAttributes().withLabel("s")));
+
+    const int v2 = 2;
+    layout.add(std::make_unique<AudioParameterFloat>(ParameterID { smoothing, v2 }, "Smoothing",
+                                                     NormalisableRange<float>(0.f, 100.f, 1.f), 60.f,
+                                                     AudioParameterFloatAttributes().withLabel("%")));
+    layout.add(std::make_unique<AudioParameterChoice>(ParameterID { guide, v2 }, "Guide",
+                                                      StringArray { "Notes", "Scales" }, 0));
+    layout.add(std::make_unique<AudioParameterChoice>(ParameterID { display, v2 }, "Display",
+                                                      StringArray { "Both", "Vocal", "Reference" }, 0));
+    layout.add(std::make_unique<AudioParameterBool>(ParameterID { hostSync, v2 }, "Logic Sync", true));
     return layout;
 }
 

@@ -4,6 +4,7 @@
 
 #include "AnalysisManager.h"
 #include "LiveData.h"
+#include "Markers.h"
 #include "ReferenceModel.h"
 #include "pitchlane/PitchDetector.h"
 #include "pitchlane/PitchSmoother.h"
@@ -47,6 +48,7 @@ public:
     juce::AudioProcessorValueTreeState& getApvts() noexcept { return apvts_; }
     ReferenceModel& getReference() noexcept { return reference_; }
     AnalysisManager& getAnalysis() noexcept { return analysis_; }
+    MarkerModel& getMarkers() noexcept { return markers_; }
 
     /** UI side of the audio->UI pitch frame queue (single consumer: the editor). */
     bool popFrame(LiveFrame& f) noexcept { return frames_.pop(f); }
@@ -61,10 +63,12 @@ public:
 
 private:
     void analyseChunk(const float* mono, int n, const TransportState& st, int offsetInBlock);
-    static HostPosition readHost(juce::AudioPlayHead* ph);
+    static HostPosition readHost(juce::AudioPlayHead* ph, int& timeSigNum, int& timeSigDen);
+    void applySmoothing(float percent) noexcept;
 
     juce::AudioProcessorValueTreeState apvts_;
     ReferenceModel reference_;
+    MarkerModel markers_;
     AnalysisManager analysis_;
 
     // Audio-thread state (all allocated in prepareToPlay).
@@ -81,6 +85,10 @@ private:
     std::atomic<float>* clarityParam_ = nullptr;
     std::atomic<float>* tempoParam_ = nullptr;
     std::atomic<float>* noteNamesParam_ = nullptr;
+    std::atomic<float>* smoothingParam_ = nullptr;
+    std::atomic<float>* hostSyncParam_ = nullptr;
+    float appliedSmoothing_ = -1.f;
+    int timeSigNum_ = 4, timeSigDen_ = 4;
     std::atomic<bool> restartFreeClock_ { false };
 
     SpscRing<LiveFrame, 8192> frames_;

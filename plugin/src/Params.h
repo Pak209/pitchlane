@@ -18,6 +18,14 @@ inline constexpr const char* gateDb      = "gateDb";       // detector RMS gate
 inline constexpr const char* clarity     = "clarity";      // minimum periodicity 0..1
 inline constexpr const char* noteNames   = "noteNames";    // 0 = C4 middle C (scientific), 1 = C3 (Logic)
 inline constexpr const char* viewSeconds = "viewSeconds";  // visible time span
+// Added in v0.2 (UI restyle); parameter version hint 2.
+inline constexpr const char* smoothing   = "smoothing";    // display smoothing amount, 0..100 %
+inline constexpr const char* guide       = "guide";        // 0 = Notes (reference melody), 1 = Scales (key/scale)
+inline constexpr const char* display     = "display";      // 0 = Both, 1 = Vocal only, 2 = Reference only
+inline constexpr const char* hostSync    = "hostSync";     // follow the host transport + tempo (Logic Sync)
+
+enum class GuideMode { Notes = 0, Scales = 1 };
+enum class DisplayMode { Both = 0, Vocal = 1, Reference = 2 };
 
 juce::AudioProcessorValueTreeState::ParameterLayout createLayout(std::function<int()> octaveConvention);
 

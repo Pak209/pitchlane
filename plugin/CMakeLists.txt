@@ -39,6 +39,16 @@ juce_add_plugin(PitchLane
     MICROPHONE_PERMISSION_TEXT "Pitch Lane listens to your voice to show its pitch."
     COPY_PLUGIN_AFTER_BUILD ${PITCHLANE_COPY_AFTER_BUILD})
 
+# Embedded assets: Inter font (SIL Open Font License 1.1, see resources/fonts/OFL.txt and docs/LICENSES.md).
+juce_add_binary_data(PitchLaneAssets
+    HEADER_NAME PitchLaneBinaryData.h
+    NAMESPACE PitchLaneBinaryData
+    SOURCES
+        ${CMAKE_CURRENT_SOURCE_DIR}/resources/fonts/Inter-Regular.ttf
+        ${CMAKE_CURRENT_SOURCE_DIR}/resources/fonts/Inter-Medium.ttf
+        ${CMAKE_CURRENT_SOURCE_DIR}/resources/fonts/Inter-SemiBold.ttf)
+set_target_properties(PitchLaneAssets PROPERTIES POSITION_INDEPENDENT_CODE TRUE)
+
 # All plugin sources live in an INTERFACE library so the unit tests can compile the very
 # same processor code without the plugin wrappers.
 add_library(PitchLaneShared INTERFACE)
@@ -49,7 +59,13 @@ target_sources(PitchLaneShared INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/ReferenceModel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/StateCodec.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/AnalysisManager.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/Params.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/Params.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/Markers.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/UiModel.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/Theme.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/Widgets.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/LiveNotePanel.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/SettingsPanel.cpp)
 target_include_directories(PitchLaneShared INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_definitions(PitchLaneShared INTERFACE
     JUCE_WEB_BROWSER=0
@@ -60,6 +76,7 @@ target_compile_definitions(PitchLaneShared INTERFACE
     JUCE_REPORT_APP_USAGE=0)
 target_link_libraries(PitchLaneShared INTERFACE
     pitchlane_core
+    PitchLaneAssets
     juce::juce_audio_utils
     juce::juce_audio_processors
     juce::juce_audio_formats

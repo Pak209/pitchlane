@@ -11,6 +11,9 @@
 #include "Params.h"
 #include "PluginProcessor.h"
 #include "StateCodec.h"
+#include "Markers.h"
+#include "PluginEditor.h"
+#include "UiModel.h"
 #include "pitchlane/NoteMath.h"
 
 using namespace pitchlane;
@@ -321,6 +324,254 @@ TEST_CASE("Plugin: reference model edits + undo")
     CHECK_EQ(m.size(), 2);
     m.selectInRange(1.5, 3.0, 0, 127, false);
     CHECK_EQ(m.numSelected(), 1);
+}
+
+// ---- UI model (restyle) -------------------------------------------------------------------------
+
+TEST_CASE("UI: roll gesture mapping matches the hint bar")
+{
+    using ui::RollAction;
+    auto act = [](bool onNote, bool edge, bool alt, bool shift, bool cmd, bool middle = false, bool ruler = false) {
+        ui::PressInfo p;
+        p.onNote = onNote; p.nearRightEdge = edge; p.alt = alt; p.shift = shift; p.cmd = cmd;
+        p.middleButton = middle; p.onRuler = ruler;
+        return ui::actionForPress(p);
+    };
+    // "Drag to adjust reference notes"
+    CHECK(act(true, false, false, false, false) == RollAction::Move);
+    // "Option-drag to create" (on empty space or over a note)
+    CHECK(act(false, false, true, false, false) == RollAction::Create);
+    CHECK(act(true, false, true, false, false) == RollAction::Create);
+    // "Shift-drag to stretch" (and the right edge of a note)
+    CHECK(act(true, false, false, true, false) == RollAction::Stretch);
+    CHECK(act(true, true, false, false, false) == RollAction::Stretch);
+    // "Double-click to delete"
+    CHECK(ui::actionForDoubleClick(true) == ui::DoubleClickAction::DeleteNote);
+    CHECK(ui::actionForDoubleClick(false) == ui::DoubleClickAction::None);
+    // selection / navigation
+    CHECK(act(true, false, false, false, true) == RollAction::ToggleSelect);
+    CHECK(act(false, false, false, false, false) == RollAction::Rubber);
+    CHECK(act(false, false, false, true, false) == RollAction::RubberAdd);
+    CHECK(act(false, false, false, false, true) == RollAction::RubberAdd);
+    CHECK(act(true, false, true, true, true, true) == RollAction::Pan);   // middle button always pans
+    CHECK(act(false, false, false, false, false, false, true) == RollAction::Pan); // ruler drag pans
+
+    // Option-drag spans in either direction, never negative, minimum length.
+    auto s1 = ui::createdSpan(2.0, 3.5);
+    CHECK_NEAR(s1.start, 2.0, 1e-12);
+    CHECK_NEAR(s1.length, 1.5, 1e-12);
+    auto s2 = ui::createdSpan(2.0, 1.0);
+    CHECK_NEAR(s2.start, 1.0, 1e-12);
+    CHECK_NEAR(s2.length, 1.0, 1e-12);
+    auto s3 = ui::createdSpan(0.01, -0.5);
+    CHECK_NEAR(s3.start, 0.0, 1e-12);
+    CHECK(s3.length >= 0.05 - 1e-12);
+    // Scroll buttons and ⌘ + scroll zoom.
+    CHECK_NEAR(ui::scrollStep(8.0, 1), 2.0, 1e-12);
+    CHECK_NEAR(ui::scrollStep(8.0, -1), -2.0, 1e-12);
+    CHECK(ui::zoomedSpan(8.0, 1.f) < 8.0);
+    CHECK(ui::zoomedSpan(8.0, -1.f) > 8.0);
+    CHECK_NEAR(ui::zoomedSpan(2.0, 1.f), 2.0, 1e-12);   // clamped
+    CHECK_NEAR(ui::zoomedSpan(30.0, -1.f), 30.0, 1e-12);
+}
+
+TEST_CASE("UI: bar ruler maths, pitch window, labels")
+{
+    ui::BarGrid g { 104.0, 4, 4 };
+    CHECK_NEAR(g.secondsPerBeat(), 60.0 / 104.0, 1e-12);
+    CHECK_NEAR(g.secondsPerBar(), 4 * 60.0 / 104.0, 1e-12);
+    CHECK_EQ(g.barAt(0.0), 1);
+    CHECK_EQ(g.barAt(g.barStart(15)), 15);
+    CHECK_EQ(g.barAt(g.barStart(15) - 1e-6), 14);
+    ui::BarGrid g68 { 120.0, 6, 8 };
+    CHECK_NEAR(g68.secondsPerBar(), 6 * 0.25, 1e-12);   // six eighth notes at 120 bpm
+
+    // Whole range fits -> shown entirely.
+    auto w = ui::fitPitchWindow(48, 72, 500.f, 15.f, 60.0);
+    CHECK_EQ(w.lo, 48);
+    CHECK_EQ(w.hi, 72);
+    // Too tall -> window around the centre, clamped to the range.
+    w = ui::fitPitchWindow(36, 84, 300.f, 15.f, 60.0);
+    CHECK_EQ(w.hi - w.lo + 1, 20);
+    CHECK(w.lo <= 60 && w.hi >= 60);
+    w = ui::fitPitchWindow(36, 84, 300.f, 15.f, 30.0);
+    CHECK_EQ(w.lo, 36);
+    w = ui::fitPitchWindow(36, 84, 300.f, 15.f, 200.0);
+    CHECK_EQ(w.hi, 84);
+    // Phrase zoom: a narrow phrase gets at least 12-13 rows.
+    CHECK_EQ(ui::rowsForPhrase(62, 71), 15);
+    CHECK_EQ(ui::rowsForPhrase(64, 65), 13);
+    w = ui::fitPitchWindow(48, 72, 500.f, 15.f, 66.5, ui::rowsForPhrase(62, 71));
+    CHECK_EQ(w.hi - w.lo + 1, 15);
+    CHECK(w.lo <= 62 && w.hi >= 71);
+
+    CHECK_EQ(ui::keyScaleText(9, ScaleType::NaturalMinor), juce::String("A minor"));
+    CHECK_EQ(ui::keyScaleText(0, ScaleType::Major), juce::String("C major"));
+    CHECK_EQ(ui::rangeText(48, 72, OctaveConvention::Scientific), juce::String(juce::CharPointer_UTF8("C3 \xe2\x80\x93 C5")));
+    CHECK_EQ(ui::rangeText(48, 72, OctaveConvention::Yamaha), juce::String(juce::CharPointer_UTF8("C2 \xe2\x80\x93 C4")));
+    CHECK_EQ(ui::signedMsText(42.0), juce::String("+42 ms"));
+    CHECK_EQ(ui::signedMsText(0.0), juce::String("0 ms"));
+    CHECK_EQ(ui::signedMsText(-8.0), juce::String(juce::CharPointer_UTF8("\xe2\x88\x92" "8 ms")));
+    CHECK_EQ(ui::semitoneText(0), juce::String("0 st"));
+    CHECK_EQ(ui::centsText(-18.2), juce::String(juce::CharPointer_UTF8("\xe2\x88\x92" "18 cents")));
+    CHECK_NEAR(ui::meterFraction(0.0), 0.5f, 1e-6);
+    CHECK_NEAR(ui::meterFraction(50.0), 1.f, 1e-6);
+    CHECK_NEAR(ui::meterFraction(-80.0), 0.f, 1e-6);
+    // Scales guide: nearest in-scale note (A minor has no G#, so 67.6 -> G, 68.4 -> A).
+    CHECK_EQ(ui::nearestScaleNote(67.6, 9, ScaleType::NaturalMinor), 67);
+    CHECK_EQ(ui::nearestScaleNote(68.4, 9, ScaleType::NaturalMinor), 69);
+    CHECK_EQ(ui::nearestScaleNote(60.8, 0, ScaleType::Major), 60);
+    CHECK_EQ(ui::nearestScaleNote(61.2, 0, ScaleType::Major), 62);
+}
+
+TEST_CASE("UI: section markers (user-editable, sorted, letters, persistence)")
+{
+    MarkerModel m;
+    CHECK_EQ(m.size(), 0);  // never any built-in / demo sections
+    const int c = m.add(40.0, "Chorus");
+    const int a = m.add(10.0, "Verse 1");
+    const int b = m.add(25.0, "  Pre-Chorus  ");
+    CHECK_EQ(c, 0);
+    CHECK_EQ(a, 0);
+    CHECK_EQ(b, 1);
+    auto ms = m.getMarkers();
+    CHECK_EQ(ms.size(), static_cast<size_t>(3));
+    CHECK_EQ(ms[0].name, juce::String("Verse 1"));
+    CHECK_EQ(ms[1].name, juce::String("Pre-Chorus"));   // trimmed
+    CHECK_EQ(ms[2].name, juce::String("Chorus"));
+    CHECK_EQ(MarkerModel::letterFor(0), juce::String("A"));
+    CHECK_EQ(MarkerModel::letterFor(2), juce::String("C"));
+    CHECK_EQ(MarkerModel::letterFor(25), juce::String("Z"));
+    CHECK_EQ(MarkerModel::letterFor(26), juce::String("AA"));
+    CHECK_EQ(MarkerModel::letterFor(27), juce::String("AB"));
+    CHECK_EQ(m.indexAt(5.0), -1);
+    CHECK_EQ(m.indexAt(10.0), 0);
+    CHECK_EQ(m.indexAt(30.0), 1);
+    CHECK_EQ(m.indexAt(99.0), 2);
+
+    CHECK(m.rename(2, "Chorus 1"));
+    CHECK(m.rename(1, "   "));                 // empty -> default "Section"
+    CHECK_EQ(m.getMarkers()[1].name, juce::String("Section"));
+    CHECK(!m.rename(7, "x"));
+    CHECK_EQ(m.move(0, 50.0), 2);               // moved past the others, re-sorted
+    CHECK_EQ(m.getMarkers()[2].name, juce::String("Verse 1"));
+    CHECK_EQ(m.move(2, -5.0), 0);               // clamped to 0
+    CHECK_NEAR(m.getMarkers()[0].time, 0.0, 1e-12);
+    CHECK(m.remove(1));
+    CHECK(!m.remove(5));
+    CHECK_EQ(m.size(), 2);
+
+    // Tree round trip.
+    MarkerModel m2;
+    m2.fromTree(m.toTree());
+    CHECK_EQ(m2.size(), 2);
+    CHECK_EQ(m2.getMarkers()[1].name, m.getMarkers()[1].name);
+    CHECK_NEAR(m2.getMarkers()[1].time, m.getMarkers()[1].time, 1e-12);
+
+    // Saved with the plugin state, together with the new UI parameters.
+    PitchLaneProcessor p1;
+    p1.getMarkers().add(12.5, "Verse 1");
+    p1.getMarkers().add(31.25, "Bridge");
+    auto setParam = [](PitchLaneProcessor& p, const char* id, float value) {
+        auto* prm = p.getApvts().getParameter(id);
+        prm->setValueNotifyingHost(prm->convertTo0to1(value));
+    };
+    setParam(p1, params::smoothing, 35.f);
+    setParam(p1, params::guide, 1.f);
+    setParam(p1, params::display, 2.f);
+    setParam(p1, params::hostSync, 0.f);
+    juce::MemoryBlock blob;
+    p1.getStateInformation(blob);
+    PitchLaneProcessor p2;
+    p2.setStateInformation(blob.getData(), static_cast<int>(blob.getSize()));
+    CHECK_EQ(p2.getMarkers().size(), 2);
+    CHECK_EQ(p2.getMarkers().getMarkers()[1].name, juce::String("Bridge"));
+    CHECK_NEAR(p2.getMarkers().getMarkers()[0].time, 12.5, 1e-12);
+    auto val = [](PitchLaneProcessor& p, const char* id) { return p.getApvts().getRawParameterValue(id)->load(); };
+    CHECK_NEAR(val(p2, params::smoothing), 35.f, 1e-4);
+    CHECK_NEAR(val(p2, params::guide), 1.f, 1e-6);
+    CHECK_NEAR(val(p2, params::display), 2.f, 1e-6);
+    CHECK_NEAR(val(p2, params::hostSync), 0.f, 1e-6);
+
+    // A v1 state (no markers) loads and clears markers.
+    PitchLaneProcessor p3;
+    p3.getMarkers().add(1.0, "stale");
+    auto tree = state::makeStateTree(p1.getApvts(), p1.getReference(), nullptr);
+    CHECK(!tree.getChildWithName(MarkerModel::treeType).isValid());
+    CHECK(state::applyStateTree(tree, p3.getApvts(), p3.getReference(), &p3.getMarkers()));
+    CHECK_EQ(p3.getMarkers().size(), 0);
+}
+
+TEST_CASE("Plugin: Logic Sync off + smoothing changes keep bit-identical pass-through and 0 latency")
+{
+    PitchLaneProcessor proc;
+    FakePlayHead ph;
+    ph.time = 5.0;
+    proc.setPlayHead(&ph);
+    proc.prepareToPlay(48000.0, 256);
+    CHECK_EQ(proc.getLatencySamples(), 0);
+    auto* sync = proc.getApvts().getParameter(params::hostSync);
+    auto* smooth = proc.getApvts().getParameter(params::smoothing);
+    juce::MidiBuffer midi;
+    bool same = true;
+    for (int i = 0; i < 200; ++i)
+    {
+        if (i == 50) sync->setValueNotifyingHost(0.f);
+        if (i % 20 == 0) smooth->setValueNotifyingHost(static_cast<float>((i / 20) % 5) / 4.f);
+        if (i == 150) sync->setValueNotifyingHost(1.f);
+        juce::AudioBuffer<float> buf(2, 256);
+        fillRandom(buf, static_cast<uint32_t>(100 + i));
+        if (i % 2 == 1)
+        {
+            const auto tone = testsig::steady(48000.0, 256 / 48000.0 + 0.001, 64, 6, 0.5);
+            for (int ch = 0; ch < 2; ++ch)
+                for (int k = 0; k < 256; ++k) buf.setSample(ch, k, tone[static_cast<size_t>(k)]);
+        }
+        juce::AudioBuffer<float> orig;
+        orig.makeCopyOf(buf);
+        proc.processBlock(buf, midi);
+        ph.time += 256 / 48000.0;
+        if (!bitIdentical(buf, orig)) same = false;
+        if (i == 100)
+        {
+            // Sync off: the host timeline is ignored, the free clock runs.
+            CHECK(proc.getTransport().source == static_cast<int>(TimeSource::FreeRunning));
+        }
+        if (i == 199)
+        {
+            CHECK(proc.getTransport().source != static_cast<int>(TimeSource::FreeRunning));
+            CHECK_EQ(proc.getTransport().timeSigNum, 4);
+        }
+    }
+    CHECK(same);
+    CHECK_EQ(proc.getLatencySamples(), 0);
+    proc.setPlayHead(nullptr);
+}
+
+TEST_CASE("UI: editor builds, lays out and paints at default and minimum size")
+{
+    PitchLaneProcessor proc;
+    proc.getReference().setNotes({ { 0.5, 0.5, 60 }, { 1.0, 0.5, 64 } }, false);
+    std::unique_ptr<juce::AudioProcessorEditor> ed(proc.createEditorAndMakeActive());
+    CHECK(ed != nullptr);
+    for (auto size : { juce::Point<int>(PitchLaneEditor::kDefaultW, PitchLaneEditor::kDefaultH),
+                       juce::Point<int>(PitchLaneEditor::kMinW, PitchLaneEditor::kMinH) })
+    {
+        ed->setSize(size.x, size.y);
+        bool inside = true, nonEmpty = true;
+        for (auto* c : ed->getChildren())
+        {
+            if (!c->isVisible() || dynamic_cast<juce::ResizableCornerComponent*>(c) != nullptr) continue;
+            if (!ed->getLocalBounds().contains(c->getBounds())) inside = false;
+            if (c->getWidth() < 12 || c->getHeight() < 12) nonEmpty = false;
+        }
+        CHECK(inside);
+        CHECK(nonEmpty);
+        const auto img = ed->createComponentSnapshot(ed->getLocalBounds(), true, 1.0f);
+        CHECK_EQ(img.getWidth(), size.x);
+    }
+    ed.reset();
+    proc.editorBeingDeleted(nullptr);
 }
 
 int main()

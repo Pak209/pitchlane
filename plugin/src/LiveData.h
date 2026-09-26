@@ -31,6 +31,7 @@ struct TransportSnapshot
     double bpm = 120.0;
     double loopStart = 0.0, loopEnd = 0.0;
     int32_t source = 2;      // pitchlane::TimeSource
+    int32_t timeSigNum = 4, timeSigDen = 4;   // host time signature (4/4 when unknown)
     uint8_t playing = 0, recording = 0, looping = 0, hasLoop = 0;
     uint32_t blockCounter = 0;
 };
