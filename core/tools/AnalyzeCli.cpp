@@ -1,6 +1,6 @@
 // pitchlane_analyze: run the offline vocal analyzer on a WAV file (developer tool).
 //   pitchlane_analyze <in.wav> <out-prefix> [key=value ...]
-// Writes <prefix>.mid, <prefix>.notes.csv, <prefix>.frames.csv and prints a JSON summary.
+// Writes <prefix>.mid (active notes), <prefix>.all.mid, <prefix>.notes.csv, <prefix>.frames.csv and prints a JSON summary.
 // key=value overrides AnalyzerSettings fields (e.g. minNoteMs=100 splitCents=70).
 
 #include <chrono>
@@ -74,9 +74,11 @@ int main(int argc, char** argv)
         fr << "time,midi,voicedProb,rmsDb\n";
         for (const auto& x : res.frames) fr << x.time << ',' << x.midi << ',' << x.voicedProb << ',' << x.rmsDb << '\n';
     }
+    for (const bool all : { false, true })
     {
-        const auto bytes = writeMidiFile(res.notes, 120.0, 480, "Pitch Lane analysis");
-        std::ofstream m(prefix + ".mid", std::ios::binary);
+        // <prefix>.mid: active notes (what the plugin exports); <prefix>.all.mid: muted too.
+        const auto bytes = writeMidiFile(res.notes, 120.0, 480, "Pitch Lane analysis", all);
+        std::ofstream m(prefix + (all ? ".all.mid" : ".mid"), std::ios::binary);
         m.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     }
     int flagged = 0;

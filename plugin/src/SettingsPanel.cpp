@@ -18,11 +18,14 @@ SettingsPanel::SettingsPanel(PitchLaneProcessor& p, Actions actions)
     addAndMakeVisible(names_);
     addRow(calib_, params::calibration, "Timing calibration",
            "Shifts your live pitch line in time to compensate for input / monitoring latency.");
+    addRow(timing_, params::timingTol, "Timing tolerance",
+           "Onsets within this many ms of the reference note count as on time (Early / Late otherwise).");
     addRow(gate_, params::gateDb, "Input gate", "Input level below which no pitch is shown.");
     addRow(clarity_, params::clarity, "Clarity threshold",
            "Higher = only very clean, periodic sound shows a pitch (suppresses breaths and noise).");
     addRow(span_, params::viewSeconds, "Visible time", String(CharPointer_UTF8("How many seconds the roll shows (also \xe2\x8c\x98 + scroll).")));
     calib_.slider.setTextValueSuffix(" ms");
+    timing_.slider.setTextValueSuffix(" ms");
     gate_.slider.setTextValueSuffix(" dB");
     span_.slider.setTextValueSuffix(" s");
     addAndMakeVisible(follow_);
@@ -33,10 +36,14 @@ SettingsPanel::SettingsPanel(PitchLaneProcessor& p, Actions actions)
     button("Import MIDI...", actions_.importMidi, "Load the reference melody from a MIDI file.");
     button("Export MIDI...", actions_.exportMidi, "Save the reference notes (offset / transpose applied) as a MIDI file.");
     button("Clear notes", [&model] { model.clear(); }, "Remove all reference notes (undoable).");
+    harmonies_ = &button("Mute harmonies", [&model] { model.setHarmoniesMuted(!model.harmoniesMuted()); },
+                         "Mute / unmute the notes flagged as harmony or backing (grey notes are not scored or exported).");
+    button("Remove muted", [&model] { model.removeMuted(); }, "Delete every muted (grey) note (undoable).");
     undo_ = &button("Undo", [&model] { model.undo(); });
     redo_ = &button("Redo", [&model] { model.redo(); });
     button("Select all", [&model] { model.selectAll(); });
     selectionButtons_.push_back(&button("Delete", [&model] { model.deleteSelected(); }, "Delete the selected notes."));
+    selectionButtons_.push_back(&button("Mute (M)", [&model] { model.toggleSelectedMuted(); }, "Mute / unmute the selected notes."));
     selectionButtons_.push_back(&button(String(CharPointer_UTF8("\xe2\x88\x92")) + "1 st", [&model] { model.nudgeSelected(-1, 0.0); }));
     selectionButtons_.push_back(&button("+1 st", [&model] { model.nudgeSelected(1, 0.0); }));
     selectionButtons_.push_back(&button(String(CharPointer_UTF8("\xe2\x97\x80")) + " 10 ms", [&model] { model.nudgeSelected(0, -0.01); }));
@@ -88,6 +95,10 @@ void SettingsPanel::timerCallback()
     const bool anySel = model.numSelected() > 0;
     for (auto* b : selectionButtons_) b->setEnabled(anySel);
     restart_->setEnabled(proc_.getTransport().source == static_cast<int>(TimeSource::FreeRunning));
+    const int suspects = model.numHarmonySuspects();
+    harmonies_->setEnabled(suspects > 0);
+    harmonies_->setButtonText(model.harmoniesMuted() ? "Unmute harmonies (" + String(suspects) + ")"
+                                                     : suspects > 0 ? "Mute harmonies (" + String(suspects) + ")" : "Mute harmonies");
     if (actions_.getFollow) follow_.setToggleState(actions_.getFollow(), dontSendNotification);
     names_.refresh();
 }
@@ -121,7 +132,7 @@ void SettingsPanel::resized()
         namesLabel_.setBounds(r.removeFromLeft(130));
         names_.setBounds(r);
     }
-    for (auto* rr : { &calib_, &gate_, &clarity_, &span_ })
+    for (auto* rr : { &calib_, &timing_, &gate_, &clarity_, &span_ })
     {
         auto r = row(26);
         rr->label.setBounds(r.removeFromLeft(130));
@@ -144,12 +155,13 @@ void SettingsPanel::resized()
     };
     section("Reference notes");
     buttonRows(0, 3, 3);   // import, export, clear
-    buttonRows(3, 3, 3);   // undo, redo, select all
-    buttonRows(6, 5, 5);   // selection edits
+    buttonRows(3, 2, 2);   // mute harmonies, remove muted
+    buttonRows(5, 3, 3);   // undo, redo, select all
+    buttonRows(8, 6, 3);   // selection edits (delete, mute, nudges)
     section("Section markers");
-    buttonRows(11, 2, 2);
+    buttonRows(14, 2, 2);
     section("Live pitch");
-    buttonRows(13, 2, 2);
+    buttonRows(16, 2, 2);
     if (getHeight() != b.getY() + 4) setSize(getWidth(), b.getY() + 4);
 }
 

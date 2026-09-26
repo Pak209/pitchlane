@@ -31,6 +31,19 @@ CreatedSpan createdSpan(double downTime, double dragTime, double minLength) noex
     return { a, std::max(minLength, b - a) };
 }
 
+NoteList notesForImport(NoteList notes, ImportVoices choice)
+{
+    sortNotes(notes);
+    switch (choice)
+    {
+        case ImportVoices::LeadHighest:       markLeadLine(notes, LeadMode::Highest); removeMuted(notes); break;
+        case ImportVoices::LeadLoudest:       markLeadLine(notes, LeadMode::LoudestSustained); removeMuted(notes); break;
+        case ImportVoices::AllHarmoniesMuted: markLeadLine(notes, LeadMode::Highest); break;
+        case ImportVoices::All:               break;
+    }
+    return notes;
+}
+
 bool TempoFollower::update(const TransportSnapshot& s)
 {
     const double bpm = s.bpm > 1.0 ? s.bpm : 120.0;

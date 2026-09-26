@@ -15,6 +15,7 @@ static const Identifier length { "l" };
 static const Identifier pitch { "p" };
 static const Identifier confidence { "c" };
 static const Identifier velocity { "v" };
+static const Identifier flags { "f" };   // RefNote::flags (muted, harmony suspect); absent = 0
 } // namespace ids
 
 ValueTree notesToTree(const NoteList& notes)
@@ -28,6 +29,7 @@ ValueTree notesToTree(const NoteList& notes)
         t.setProperty(ids::pitch, n.pitch, nullptr);
         t.setProperty(ids::confidence, static_cast<double>(n.confidence), nullptr);
         t.setProperty(ids::velocity, n.velocity, nullptr);
+        if (n.flags != 0) t.setProperty(ids::flags, static_cast<int>(n.flags), nullptr);
         ref.appendChild(t, nullptr);
     }
     return ref;
@@ -45,6 +47,7 @@ NoteList notesFromTree(const ValueTree& ref)
         n.pitch = static_cast<int>(t.getProperty(ids::pitch, 60));
         n.confidence = static_cast<float>(static_cast<double>(t.getProperty(ids::confidence, 1.0)));
         n.velocity = static_cast<int>(t.getProperty(ids::velocity, 100));
+        n.flags = static_cast<uint8_t>(static_cast<int>(t.getProperty(ids::flags, 0)) & (RefNote::Muted | RefNote::HarmonySuspect));
         notes.push_back(n);
     }
     sanitiseNotes(notes);

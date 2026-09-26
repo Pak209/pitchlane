@@ -138,6 +138,82 @@ void ReferenceModel::deleteSelected()
     changed();
 }
 
+void ReferenceModel::setSelectedMuted(bool muted)
+{
+    {
+        const juce::ScopedLock sl(lock_);
+        bool any = false;
+        for (size_t i = 0; i < notes_.size(); ++i) any = any || (selected_[i] && notes_[i].muted() != muted);
+        if (!any) return;
+        pushUndoLocked();
+        for (size_t i = 0; i < notes_.size(); ++i)
+            if (selected_[i]) notes_[i].setFlag(RefNote::Muted, muted);
+    }
+    changed();
+}
+
+void ReferenceModel::toggleSelectedMuted()
+{
+    bool allMuted = true, anySel = false;
+    {
+        const juce::ScopedLock sl(lock_);
+        for (size_t i = 0; i < notes_.size(); ++i)
+            if (selected_[i]) { anySel = true; allMuted = allMuted && notes_[i].muted(); }
+    }
+    if (anySel) setSelectedMuted(!allMuted);
+}
+
+void ReferenceModel::setHarmoniesMuted(bool muted)
+{
+    {
+        const juce::ScopedLock sl(lock_);
+        bool any = false;
+        for (const auto& n : notes_) any = any || (n.harmonySuspect() && n.muted() != muted);
+        if (!any) return;
+        pushUndoLocked();
+        for (auto& n : notes_)
+            if (n.harmonySuspect()) n.setFlag(RefNote::Muted, muted);
+    }
+    changed();
+}
+
+int ReferenceModel::numHarmonySuspects() const
+{
+    const juce::ScopedLock sl(lock_);
+    return static_cast<int>(std::count_if(notes_.begin(), notes_.end(), [](const RefNote& n) { return n.harmonySuspect(); }));
+}
+
+int ReferenceModel::numMuted() const
+{
+    const juce::ScopedLock sl(lock_);
+    return static_cast<int>(std::count_if(notes_.begin(), notes_.end(), [](const RefNote& n) { return n.muted(); }));
+}
+
+bool ReferenceModel::harmoniesMuted() const
+{
+    const juce::ScopedLock sl(lock_);
+    bool any = false;
+    for (const auto& n : notes_)
+        if (n.harmonySuspect()) { any = true; if (!n.muted()) return false; }
+    return any;
+}
+
+void ReferenceModel::removeMuted()
+{
+    {
+        const juce::ScopedLock sl(lock_);
+        if (std::none_of(notes_.begin(), notes_.end(), [](const RefNote& n) { return n.muted(); })) return;
+        pushUndoLocked();
+        NoteList kept;
+        std::vector<bool> sel;
+        for (size_t i = 0; i < notes_.size(); ++i)
+            if (!notes_[i].muted()) { kept.push_back(notes_[i]); sel.push_back(selected_[i]); }
+        notes_.swap(kept);
+        selected_.swap(sel);
+    }
+    changed();
+}
+
 void ReferenceModel::nudgeSelected(int semis, double secs)
 {
     {

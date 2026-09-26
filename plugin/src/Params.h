@@ -25,6 +25,7 @@ inline constexpr const char* display     = "display";      // 0 = Both, 1 = Voca
 inline constexpr const char* hostSync    = "hostSync";     // follow the host transport + tempo (Logic Sync)
 // Added in v0.3; parameter version hint 3.
 inline constexpr const char* timeSig     = "timeSig";      // manual time signature (used when not following the host)
+inline constexpr const char* timingTol   = "timingTol";    // ms: onset within +- this is "on time" (take feedback)
 
 struct TimeSig { int num, den; };
 inline constexpr TimeSig timeSigChoices[] = { { 2, 4 }, { 3, 4 }, { 4, 4 }, { 5, 4 }, { 6, 8 }, { 7, 8 }, { 9, 8 }, { 12, 8 } };

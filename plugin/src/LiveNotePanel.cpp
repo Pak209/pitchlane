@@ -60,6 +60,17 @@ void LiveNotePanel::paint(Graphics& g)
         g.setFont(theme::font(11.f));
         g.drawText("no reference note here", b.removeFromTop(14.f), Justification::centredLeft, false);
     }
+    if (r_.lastNoteText.isNotEmpty())
+    {
+        b.removeFromTop(6.f);
+        const Colour c = r_.lastNoteTiming == 0 ? col::green : r_.lastNoteTiming == 1 ? col::amber : col::off;
+        g.setColour(c);
+        g.setFont(theme::font(12.5f, theme::Weight::Medium));
+        g.drawFittedText(r_.lastNoteText, b.removeFromTop(32.f).toNearestInt(), Justification::topLeft, 2, 0.9f);
+        g.setColour(col::textDim);
+        g.setFont(theme::font(11.f));
+        g.drawFittedText(r_.takeText, b.removeFromTop(30.f).toNearestInt(), Justification::topLeft, 2, 0.9f);
+    }
 
     // ---- confidence (bottom) --------------------------------------------------------------
     auto conf = b.removeFromBottom(38.f);

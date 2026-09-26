@@ -46,8 +46,9 @@ MidiParseResult parseMidiFile(const uint8_t* data, size_t size);
     track with the most notes, skipping General-MIDI drum channel 10. */
 NoteList referenceNotesFromMidi(const MidiParseResult& midi, int trackIndex = -1);
 
-/** Write notes as a format-1 SMF (tempo track + one note track) at a constant tempo. */
+/** Write notes as a format-1 SMF (tempo track + one note track) at a constant tempo.
+    Muted notes are left out unless includeMuted. */
 std::vector<uint8_t> writeMidiFile(const NoteList& notes, double bpm, int ticksPerQuarter = 480,
-                                   const std::string& trackName = "Pitch Lane Reference");
+                                   const std::string& trackName = "Pitch Lane Reference", bool includeMuted = false);
 
 } // namespace pitchlane

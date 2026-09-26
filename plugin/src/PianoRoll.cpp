@@ -88,6 +88,8 @@ void PianoRoll::update()
 {
     snap_ = proc_.getTransport();
     if (tempo_.update(snap_)) repaint();
+    syncScorer();
+    const double calib = proc_.getApvts().getRawParameterValue(params::calibration)->load() * 0.001;
 
     LiveFrame f;
     int drained = 0;
@@ -96,6 +98,7 @@ void PianoRoll::update()
         ++drained;
         if (f.flags & LiveFrame::Jump)
         {
+            scorer_.reset();   // new pass: new take
             // New pass (seek, loop wrap, play start): drop the old trace from here on so the
             // re-sung section is drawn fresh.
             auto it = std::lower_bound(history_.begin(), history_.end(), f.songTime - 1e-3,
@@ -115,6 +118,8 @@ void PianoRoll::update()
                 history_.erase(it, history_.end());
             }
             history_.push_back({ f.songTime, (f.flags & LiveFrame::Voiced) ? f.midi : 0.f });
+            if (f.flags & LiveFrame::Playing)
+                scorer_.addFrame(f.songTime + calib, (f.flags & LiveFrame::Voiced) ? (f.rawMidi > 0.f ? f.rawMidi : f.midi) : 0.f);
         }
     }
     if (history_.size() > 400000) history_.erase(history_.begin(), history_.begin() + 100000);
@@ -175,9 +180,68 @@ PianoRoll::Target PianoRoll::targetAt(const View& v, const NoteList& notes, doub
     return t;
 }
 
+void PianoRoll::syncScorer()
+{
+    auto& ap = proc_.getApvts();
+    const double offset = ap.getRawParameterValue(params::refOffset)->load() * 0.001;
+    const int transpose = roundToInt(ap.getRawParameterValue(params::transpose)->load());
+    const float timingTol = ap.getRawParameterValue(params::timingTol)->load();
+    const float pitchTol = ap.getRawParameterValue(params::tolerance)->load();
+    const auto rev = proc_.getReference().getRevision();
+    if (rev == scorerRevision_ && std::abs(offset - scorerOffset_) < 1e-9 && transpose == scorerTranspose_
+        && std::abs(timingTol - scorerTimingTol_) < 1e-4f && std::abs(pitchTol - scorerPitchTol_) < 1e-4f)
+        return;
+    scorerRevision_ = rev;
+    scorerOffset_ = offset;
+    scorerTranspose_ = transpose;
+    scorerTimingTol_ = timingTol;
+    scorerPitchTol_ = pitchTol;
+    ScoreSettings ss = scorer_.settings();
+    ss.timingTolMs = timingTol;
+    ss.pitchTolCents = pitchTol;
+    scorer_.setSettings(ss);
+    ReferenceMapping map;
+    map.offsetSec = offset;
+    map.transpose = transpose;
+    scorer_.setReference(proc_.getReference().getNotes(), map);   // edits start a new take
+}
+
+namespace {
+String timingText(const NoteScore& s)
+{
+    const auto ms = String(roundToInt(s.onsetErrorMs));
+    switch (s.timing)
+    {
+        case NoteScore::Timing::OnTime: return "On time (" + (s.onsetErrorMs >= 0 ? "+" + ms : ms) + " ms)";
+        case NoteScore::Timing::Early:  return "Early " + ms + " ms";
+        case NoteScore::Timing::Late:   return "Late +" + ms + " ms";
+        case NoteScore::Timing::Missed: return "Missed";
+    }
+    return {};
+}
+} // namespace
+
 Readout PianoRoll::computeReadout() const
 {
     Readout r;
+    if (const auto* last = scorer_.latest())
+    {
+        r.lastNoteTiming = static_cast<int>(last->timing);
+        r.lastNoteText = timingText(*last);
+        if (last->timing != NoteScore::Timing::Missed && last->pitch != NoteScore::Pitch::Unknown)
+        {
+            const int c = roundToInt(last->meanCents);
+            r.lastNoteText << String(CharPointer_UTF8(" \xc2\xb7 "))
+                           << (last->pitch == NoteScore::Pitch::InTune ? String("in tune")
+                                                                       : String(std::abs(c)) + String(CharPointer_UTF8("\xc2\xa2 ")) + (c > 0 ? "sharp" : "flat"));
+            if (last->drifting) r.lastNoteText << (last->driftCents > 0 ? ", drifting up" : ", drifting down");
+        }
+        const auto sum = scorer_.summary();
+        r.takeText = "Take: " + String(sum.onTime) + "/" + String(sum.scored) + " on time";
+        if (sum.early > 0) r.takeText << String(CharPointer_UTF8(" \xc2\xb7 ")) << sum.early << " early";
+        if (sum.late > 0) r.takeText << String(CharPointer_UTF8(" \xc2\xb7 ")) << sum.late << " late";
+        if (sum.missed > 0) r.takeText << String(CharPointer_UTF8(" \xc2\xb7 ")) << sum.missed << " missed";
+    }
     r.confidence = latest_.confidence;
     const bool fresh = Time::getMillisecondCounterHiRes() - latestWallMs_ < 200.0;
     if (!fresh || latest_.midi <= 0.f)
@@ -380,6 +444,20 @@ void PianoRoll::paint(Graphics& g)
                 g.fillRoundedRectangle(r.getX(), y, r.getWidth(), 4.f, 2.f);
                 continue;
             }
+            if (n.muted())
+            {
+                // Muted (harmony / backing, or muted by hand): grey, no glow; not scored or exported.
+                g.setColour(Colour(0xff4a4e5e).withAlpha(0.55f));
+                g.fillRoundedRectangle(r, 3.f);
+                g.setColour(n.harmonySuspect() ? col::amber.withAlpha(0.5f) : Colour(0xff8a8fa3).withAlpha(0.6f));
+                g.drawRoundedRectangle(r, 3.f, 1.f);
+                if (isSel)
+                {
+                    g.setColour(Colours::white.withAlpha(0.8f));
+                    g.drawRoundedRectangle(r.expanded(1.5f), 4.f, 1.5f);
+                }
+                continue;
+            }
             const bool active = static_cast<int>(i) == activeIdx;
             const float alpha = 0.55f + 0.45f * jlimit(0.f, 1.f, n.confidence);
             theme::glowRoundedRect(g, r, 3.f, col::lavender.withAlpha(alpha), active ? 9.f : 6.f);
@@ -408,6 +486,44 @@ void PianoRoll::paint(Graphics& g)
             theme::glowRoundedRect(g, br, 2.f, col::off, 5.f);
             g.setColour(col::off);
             g.fillRoundedRectangle(br, 2.f);
+        }
+        // Take feedback: onset ticks (green on time, amber early, orange late), missed notes
+        // outlined, drift arrows at the note end.
+        for (const auto& sc : scorer_.scores())
+        {
+            if (sc.noteIndex < 0 || sc.noteIndex >= static_cast<int>(notes.size())) continue;
+            const auto& n = notes[static_cast<size_t>(sc.noteIndex)];
+            if (n.end() + v.offset < v.start || n.start + v.offset > v.start + v.span) continue;
+            const auto r = noteRect(v, n);
+            if (sc.timing == NoteScore::Timing::Missed)
+            {
+                g.setColour(col::off.withAlpha(0.9f));
+                const float dash[] = { 4.f, 3.f };
+                Path p;
+                p.addRoundedRectangle(r.expanded(2.f), 4.f);
+                Path dashed;
+                PathStrokeType(1.4f).createDashedStroke(dashed, p, dash, 2);
+                g.fillPath(dashed);
+                continue;
+            }
+            const Colour c = sc.timing == NoteScore::Timing::OnTime ? col::green
+                           : sc.timing == NoteScore::Timing::Early ? col::amber : col::off;
+            const float x = v.xForTime(sc.onsetSongTime);   // already in calibrated trace time
+            g.setColour(c);
+            g.fillRect(x - 1.f, r.getY() - 4.f, 2.5f, r.getHeight() + 8.f);
+            if (sc.timing != NoteScore::Timing::OnTime && r.getHeight() >= 8.f)
+            {
+                g.setFont(theme::font(10.f, theme::Weight::Medium));
+                const auto txt = (sc.onsetErrorMs > 0 ? "+" : "") + String(roundToInt(sc.onsetErrorMs));
+                g.drawText(txt, Rectangle<float>(x - 30.f, r.getY() - 15.f, 60.f, 12.f), Justification::centred, false);
+            }
+            if (sc.drifting)
+            {
+                const float ex = r.getRight() + 3.f, cy = r.getCentreY();
+                const float dy = sc.driftCents > 0 ? -5.f : 5.f;
+                g.setColour(col::amber);
+                g.drawArrow(Line<float>(ex, cy - dy, ex + 7.f, cy + dy), 1.5f, 5.f, 5.f);
+            }
         }
     }
 
@@ -701,6 +817,13 @@ void PianoRoll::mouseDown(const MouseEvent& e)
         return;
     }
 
+    if (e.mods.isPopupMenu() && v.area.contains(e.position))
+    {
+        bool nearRightEdge = false;
+        showNoteMenu(e, hitTestNote(v, model.getNotes(), e.position, nearRightEdge));
+        return;
+    }
+
     ui::PressInfo press;
     press.onRuler = v.ruler.withLeft(0.f).contains(e.position);
     press.middleButton = e.mods.isMiddleButtonDown();
@@ -984,6 +1107,36 @@ void PianoRoll::beginRename(int index)
     repaint();
 }
 
+void PianoRoll::showNoteMenu(const MouseEvent& e, int noteIndex)
+{
+    auto& model = proc_.getReference();
+    if (noteIndex >= 0 && !model.getSelection()[static_cast<size_t>(noteIndex)]) model.selectOnly(noteIndex);
+    const auto notes = model.getNotes();
+    const auto sel = model.getSelection();
+    int selCount = 0, selMuted = 0;
+    for (size_t i = 0; i < notes.size(); ++i)
+        if (sel[i]) { ++selCount; selMuted += notes[i].muted() ? 1 : 0; }
+    const int suspects = model.numHarmonySuspects();
+    PopupMenu m;
+    m.addItem(1, selMuted == selCount && selCount > 0 ? "Unmute selected (M)" : "Mute selected (M)", selCount > 0);
+    m.addItem(2, "Delete selected", selCount > 0);
+    m.addSeparator();
+    m.addItem(3, (model.harmoniesMuted() ? "Unmute harmonies" : "Mute harmonies") + String(suspects > 0 ? " (" + String(suspects) + ")" : ""),
+              suspects > 0);
+    m.addItem(4, "Remove muted notes (" + String(model.numMuted()) + ")", model.numMuted() > 0);
+    SafePointer<PianoRoll> safe(this);
+    m.showMenuAsync(PopupMenu::Options().withTargetScreenArea(Rectangle<int>(e.getScreenPosition(), e.getScreenPosition()).expanded(1)),
+                    [safe](int r) {
+                        if (safe == nullptr) return;
+                        auto& mm = safe->proc_.getReference();
+                        if (r == 1) mm.toggleSelectedMuted();
+                        else if (r == 2) mm.deleteSelected();
+                        else if (r == 3) mm.setHarmoniesMuted(!mm.harmoniesMuted());
+                        else if (r == 4) mm.removeMuted();
+                        safe->repaint();
+                    });
+}
+
 bool PianoRoll::handleKey(const KeyPress& key)
 {
     auto& model = proc_.getReference();
@@ -995,6 +1148,7 @@ bool PianoRoll::handleKey(const KeyPress& key)
     if (code == KeyPress::leftKey)  { model.nudgeSelected(0, mods.isShiftDown() ? -0.1 : -0.01); return true; }
     if (code == KeyPress::rightKey) { model.nudgeSelected(0, mods.isShiftDown() ? 0.1 : 0.01); return true; }
     if (code == KeyPress::escapeKey) { model.clearSelection(); return true; }
+    if (!mods.isCommandDown() && (code == 'M' || code == 'm')) { model.toggleSelectedMuted(); return true; }
     if (mods.isCommandDown() && (code == 'A' || code == 'a')) { model.selectAll(); return true; }
     if (mods.isCommandDown() && (code == 'Z' || code == 'z'))
     {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "LiveData.h"
+#include "pitchlane/ReferenceNotes.h"
 #include "pitchlane/TempoMap.h"
 // Pure UI logic (no painting) so it can be unit-tested headlessly: mouse-gesture mapping for
 // the piano roll, bar/beat maths for the ruler, visible pitch window, label formatting.
@@ -48,6 +49,12 @@ struct CreatedSpan { double start, length; };
 CreatedSpan createdSpan(double downTime, double dragTime, double minLength = 0.05) noexcept;
 
 // ---- ruler / grid ----------------------------------------------------------------------
+// ---- MIDI import with harmonies --------------------------------------------------------
+enum class ImportVoices { LeadHighest = 1, LeadLoudest = 2, AllHarmoniesMuted = 3, All = 4 };
+/** Applies the MIDI-import choice for a polyphonic part: keep only the lead line (top voice,
+    or loudest / most sustained), or keep every voice with the harmonies muted, or all as is. */
+NoteList notesForImport(NoteList notes, ImportVoices choice);
+
 /** Keeps the editor's tempo map in step with the transport: follows the host's tempo map
     (learned from ppq / bar-start observations) while Logic supplies a musical position, and
     otherwise shows a constant grid at the current (manual) tempo and time signature. */

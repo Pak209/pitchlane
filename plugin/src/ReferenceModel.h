@@ -36,6 +36,18 @@ public:
         whole gesture a single undo step. */
     void beginGesture();
     void deleteSelected();
+    /** Mute / unmute the selected notes (muted notes are grey, not scored, not exported). */
+    void setSelectedMuted(bool muted);
+    /** 'M': mute the selection, or unmute it if every selected note is already muted. */
+    void toggleSelectedMuted();
+    /** Mute or unmute every note flagged as a harmony suspect (analyzer / MIDI import). */
+    void setHarmoniesMuted(bool muted);
+    int numHarmonySuspects() const;
+    int numMuted() const;
+    /** True when there are harmony suspects and all of them are muted. */
+    bool harmoniesMuted() const;
+    /** Delete all muted notes (undoable). */
+    void removeMuted();
     void nudgeSelected(int semitones, double seconds);
     /** Apply absolute positions to the given notes (during drags; no undo push). */
     void setNote(int index, const RefNote& n);

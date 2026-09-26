@@ -15,6 +15,8 @@
 #include "PluginEditor.h"
 #include "UiModel.h"
 #include "pitchlane/NoteMath.h"
+#include "pitchlane/TakeScorer.h"
+#include "ReferenceModel.h"
 
 using namespace pitchlane;
 
@@ -908,5 +910,101 @@ TEST_CASE("Formats: optional local files via PITCHLANE_EXTRA_AUDIO (not in CI)")
                     static_cast<double>(d.mono.size()) / d.sampleRate, t1 - t0, t2 - t1,
                     static_cast<int>(ar.notes.size()), suspects);
         CHECK(!ar.notes.empty());
+    }
+}
+
+TEST_CASE("Harmony: mute / unmute, harmonies toggle, remove muted (undoable), flags persist")
+{
+    ReferenceModel m;
+    NoteList n { { 0.0, 1.0, 72, 1.f, 100 }, { 0.0, 1.0, 69, 1.f, 70 }, { 1.0, 1.0, 74, 1.f, 100 }, { 1.0, 1.0, 71, 1.f, 70 } };
+    n = ui::notesForImport(n, ui::ImportVoices::AllHarmoniesMuted);
+    m.setNotes(n, false);
+    CHECK_EQ(m.numHarmonySuspects(), 2);
+    CHECK_EQ(m.numMuted(), 2);
+    CHECK(m.harmoniesMuted());
+    m.setHarmoniesMuted(false);
+    CHECK_EQ(m.numMuted(), 0);
+    CHECK(!m.harmoniesMuted());
+    CHECK(m.undo());
+    CHECK_EQ(m.numMuted(), 2);
+    // 'M' on a lead note mutes it; again unmutes.
+    int lead = -1;
+    const auto notes = m.getNotes();
+    for (int i = 0; i < static_cast<int>(notes.size()); ++i) if (notes[size_t(i)].pitch == 74) lead = i;
+    m.selectOnly(lead);
+    m.toggleSelectedMuted();
+    CHECK(m.getNotes()[size_t(lead)].muted());
+    CHECK_EQ(m.numMuted(), 3);
+    m.toggleSelectedMuted();
+    CHECK_EQ(m.numMuted(), 2);
+
+    // Flags survive the plugin state.
+    {
+        PitchLaneProcessor a;
+        a.getReference().setNotes(m.getNotes(), false);
+        juce::MemoryBlock state;
+        a.getStateInformation(state);
+        PitchLaneProcessor b;
+        b.setStateInformation(state.getData(), static_cast<int>(state.getSize()));
+        CHECK_EQ(b.getReference().numMuted(), 2);
+        CHECK_EQ(b.getReference().numHarmonySuspects(), 2);
+    }
+
+    m.removeMuted();
+    CHECK_EQ(m.size(), 2);
+    CHECK_EQ(m.numMuted(), 0);
+    CHECK(m.undo());
+    CHECK_EQ(m.size(), 4);
+
+    // Import choices.
+    const NoteList two { { 0.0, 1.0, 72, 1.f, 60 }, { 0.0, 1.0, 64, 1.f, 120 }, { 1.0, 1.0, 74, 1.f, 60 }, { 1.0, 1.0, 65, 1.f, 120 } };
+    const auto top = ui::notesForImport(two, ui::ImportVoices::LeadHighest);
+    CHECK_EQ(top.size(), size_t(2));
+    CHECK_EQ(top[0].pitch, 72);
+    const auto loud = ui::notesForImport(two, ui::ImportVoices::LeadLoudest);
+    CHECK_EQ(loud.size(), size_t(2));
+    CHECK_EQ(loud[0].pitch, 64);
+    CHECK_EQ(ui::notesForImport(two, ui::ImportVoices::All).size(), size_t(4));
+    CHECK_EQ(maxPolyphony(ui::notesForImport(two, ui::ImportVoices::All)), 2);
+}
+
+TEST_CASE("Feedback: live frames from the processor are scored on time / late against the reference")
+{
+    const NoteList ref { { 1.0, 0.45, 60, 1.f, 100 }, { 1.5, 0.45, 64, 1.f, 100 }, { 2.0, 0.45, 67, 1.f, 100 } };
+    for (const double shift : { 0.0, 0.15 })
+    {
+        PitchLaneProcessor proc;
+        FakePlayHead ph;
+        proc.setPlayHead(&ph);
+        const double sr = 48000.0;
+        proc.prepareToPlay(sr, 480);
+        std::vector<testsig::MelodyNote> sung;
+        for (const auto& n : ref) sung.push_back({ n.start + shift, n.length, n.pitch });
+        const auto audio = testsig::melody(sr, 3.2, sung);
+        TakeScorer scorer;
+        scorer.setReference(ref, {});
+        juce::MidiBuffer midi;
+        LiveFrame f;
+        for (size_t pos = 0; pos + 480 <= audio.size(); pos += 480)
+        {
+            juce::AudioBuffer<float> buf(2, 480);
+            for (int ch = 0; ch < 2; ++ch) buf.copyFrom(ch, 0, audio.data() + pos, 480);
+            proc.processBlock(buf, midi);
+            ph.time += 480 / sr;
+            while (proc.popFrame(f))
+                if ((f.flags & LiveFrame::Playing) && !(f.flags & LiveFrame::Jump))
+                    scorer.addFrame(f.songTime, (f.flags & LiveFrame::Voiced) ? (f.rawMidi > 0.f ? f.rawMidi : f.midi) : 0.f);
+        }
+        scorer.finishUpTo(10.0);
+        INFO("shift " << shift);
+        CHECK_EQ(scorer.scores().size(), size_t(3));
+        for (const auto& sc : scorer.scores())
+        {
+            INFO("onset error " << sc.onsetErrorMs << " ms");
+            CHECK(sc.timing == (shift > 0.1 ? NoteScore::Timing::Late : NoteScore::Timing::OnTime));
+            CHECK(std::abs(sc.onsetErrorMs - shift * 1000.0) < 45.0);   // detector onset latency is compensated
+            CHECK(sc.pitch == NoteScore::Pitch::InTune);
+        }
+        proc.setPlayHead(nullptr);
     }
 }

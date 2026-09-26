@@ -43,10 +43,10 @@ private:
     Actions actions_;
     SegmentedControl names_;
     juce::Label namesLabel_;
-    Row calib_, gate_, clarity_, span_;
+    Row calib_, timing_, gate_, clarity_, span_;
     juce::ToggleButton follow_ { "Follow playhead" };
     juce::OwnedArray<juce::TextButton> buttons_;
-    juce::TextButton *undo_ = nullptr, *redo_ = nullptr, *restart_ = nullptr;
+    juce::TextButton *undo_ = nullptr, *redo_ = nullptr, *restart_ = nullptr, *harmonies_ = nullptr;
     std::vector<juce::TextButton*> selectionButtons_;
     std::vector<std::pair<juce::String, int>> sections_; // title, y
 };

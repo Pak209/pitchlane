@@ -12,6 +12,7 @@
 #include "pitchlane/NoteMath.h"
 #include "pitchlane/ReferenceNotes.h"
 #include "pitchlane/TempoMap.h"
+#include "pitchlane/TakeScorer.h"
 
 namespace pitchlane {
 
@@ -27,6 +28,10 @@ struct Readout
     float cents = 0.f;       // vs target if any, else vs nearest semitone
     float confidence = 0.f;  // detector clarity (1 - YIN aperiodicity) of the latest frame
     TuningStatus status = TuningStatus::NoPitch;
+    // Take feedback (last finished note + running summary); empty when nothing scored yet.
+    juce::String lastNoteText;   // e.g. "Late +80 ms · 12¢ sharp"
+    int lastNoteTiming = -1;     // NoteScore::Timing as int, -1 = none
+    juce::String takeText;       // e.g. "Take: 9/12 on time · 2 late · 1 missed"
 };
 
 class PianoRoll : public juce::Component
@@ -115,6 +120,20 @@ private:
     double latestWallMs_ = 0.0;
     TransportSnapshot snap_;
     ui::TempoFollower tempo_;
+    TakeScorer scorer_;
+    uint32_t scorerRevision_ = 0xffffffffu;
+    double scorerOffset_ = 1e300;
+    int scorerTranspose_ = 0;
+    float scorerTimingTol_ = -1.f, scorerPitchTol_ = -1.f;
+    void syncScorer();
+    void showNoteMenu(const juce::MouseEvent& e, int noteIndex);
+
+public:
+    const TakeScorer& getScorer() const noexcept { return scorer_; }
+    /** Test hook: feed a frame to the take scorer as update() would. */
+    void scoreFrameForTest(double songTime, float midi) { syncScorer(); scorer_.addFrame(songTime, midi); }
+
+private:
     bool wasPlaying_ = false;
     bool follow_ = true;
     double viewStart_ = 0.0;

@@ -43,8 +43,9 @@ struct ReferenceMapping
 /** Sort by start time (then pitch). */
 void sortNotes(NoteList& notes);
 
-/** Index of the note sounding at reference time t, or -1. If notes overlap, the one that
-    started most recently wins. Notes must be sorted. O(log n) + overlap scan. */
+/** Index of the unmuted note sounding at reference time t, or -1. If notes overlap, the one
+    that started most recently wins; muted notes are ignored. Notes must be sorted.
+    O(log n) + overlap scan. */
 int findActiveNote(const NoteList& notes, double t) noexcept;
 
 /** Index of the first note whose end is after t (for iterating a visible range). Sorted input. */
@@ -58,5 +59,24 @@ void mergeSamePitchGaps(NoteList& notes, double maxGap);
 
 /** Clamp pitches to the MIDI range and lengths to a minimum. */
 void sanitiseNotes(NoteList& notes, double minLength = 0.01);
+
+// ---- polyphonic references (MIDI with harmonies) --------------------------------------
+/** Largest number of notes sounding at once, ignoring overlaps shorter than `tolerance`
+    seconds (legato overlaps between consecutive melody notes). */
+int maxPolyphony(const NoteList& notes, double tolerance = 0.03) noexcept;
+
+enum class LeadMode
+{
+    Highest,           // skyline: the top voice is the melody
+    LoudestSustained,  // the loudest / longest note wins (velocity x length), ties -> higher
+};
+
+/** Flags every note that is not part of the lead line as HarmonySuspect + Muted: a note is
+    a harmony when notes with higher priority (see LeadMode) cover more than half of it.
+    Returns the number of flagged notes. Sorted input. */
+int markLeadLine(NoteList& notes, LeadMode mode);
+
+/** Remove muted notes. */
+void removeMuted(NoteList& notes);
 
 } // namespace pitchlane

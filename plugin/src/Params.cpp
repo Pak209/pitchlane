@@ -80,6 +80,9 @@ AudioProcessorValueTreeState::ParameterLayout createLayout(std::function<int()> 
     for (const auto& s : timeSigChoices) sigs.add(String(s.num) + "/" + String(s.den));
     layout.add(std::make_unique<AudioParameterChoice>(ParameterID { timeSig, v3 }, "Manual time signature", sigs,
                                                       defaultTimeSigIndex));
+    layout.add(std::make_unique<AudioParameterFloat>(ParameterID { timingTol, v3 }, "Timing tolerance",
+                                                     NormalisableRange<float>(20.f, 300.f, 5.f), 80.f,
+                                                     AudioParameterFloatAttributes().withLabel("ms")));
     return layout;
 }
 

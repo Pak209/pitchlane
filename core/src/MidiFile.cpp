@@ -280,7 +280,7 @@ NoteList referenceNotesFromMidi(const MidiParseResult& midi, int trackIndex)
     return out;
 }
 
-std::vector<uint8_t> writeMidiFile(const NoteList& notes, double bpm, int tpq, const std::string& trackName)
+std::vector<uint8_t> writeMidiFile(const NoteList& notes, double bpm, int tpq, const std::string& trackName, bool includeMuted)
 {
     bpm = (bpm > 1.0 && bpm < 1000.0) ? bpm : 120.0;
     tpq = std::clamp(tpq, 24, 32767);
@@ -312,6 +312,7 @@ std::vector<uint8_t> writeMidiFile(const NoteList& notes, double bpm, int tpq, c
     std::vector<Ev> evs;
     for (const auto& n : notes)
     {
+        if (n.muted() && !includeMuted) continue;
         const auto a = static_cast<uint64_t>(std::llround(std::max(0.0, n.start) * ticksPerSec));
         auto b = static_cast<uint64_t>(std::llround(std::max(0.0, n.end()) * ticksPerSec));
         if (b <= a) b = a + 1;

@@ -642,18 +642,40 @@ void PitchLaneEditor::importMidiFile(const File& f)
         return;
     }
 
-    auto apply = [this, parsed, f](int track) {
+    auto commit = [this, f](NoteList notes) {
+        const int muted = static_cast<int>(std::count_if(notes.begin(), notes.end(), [](const RefNote& n) { return n.muted(); }));
+        proc_.getReference().setNotes(std::move(notes), true);
+        proc_.getReference().setSourcePath(f.getFullPathName());
+        pendingVocal_ = File();
+        updateReferenceField();
+        showToast("Imported " + String(proc_.getReference().size()) + " notes from " + f.getFileName()
+                  + (muted > 0 ? " (" + String(muted) + " harmony notes muted)" : String()));
+    };
+    auto apply = [this, parsed, f, commit](int track) {
         auto notes = referenceNotesFromMidi(*parsed, track);
         if (notes.empty())
         {
             AlertWindow::showMessageBoxAsync(MessageBoxIconType::InfoIcon, "Import MIDI", "No notes found in " + f.getFileName());
             return;
         }
-        proc_.getReference().setNotes(std::move(notes), true);
-        proc_.getReference().setSourcePath(f.getFullPathName());
-        pendingVocal_ = File();
-        updateReferenceField();
-        showToast("Imported " + String(proc_.getReference().size()) + " notes from " + f.getFileName());
+        const int voices = maxPolyphony(notes);
+        if (voices <= 1)
+        {
+            commit(std::move(notes));
+            return;
+        }
+        // Harmonies / chords in the part: ask how to handle them.
+        PopupMenu m;
+        m.addSectionHeader("This part has harmonies (up to " + String(voices) + " voices at once)");
+        m.addItem(static_cast<int>(ui::ImportVoices::LeadHighest), "Lead only: top voice");
+        m.addItem(static_cast<int>(ui::ImportVoices::LeadLoudest), "Lead only: loudest / longest notes");
+        m.addItem(static_cast<int>(ui::ImportVoices::AllHarmoniesMuted), "Keep all voices, harmonies muted (grey)");
+        m.addItem(static_cast<int>(ui::ImportVoices::All), "Keep all voices as they are");
+        auto shared = std::make_shared<NoteList>(std::move(notes));
+        m.showMenuAsync(PopupMenu::Options().withTargetComponent(&refField_), [shared, commit](int r) {
+            if (r <= 0) return;
+            commit(ui::notesForImport(*shared, static_cast<ui::ImportVoices>(r)));
+        });
     };
 
     // Offer a track choice when several tracks contain (non-drum) notes.
