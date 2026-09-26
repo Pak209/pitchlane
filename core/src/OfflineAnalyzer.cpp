@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <complex>
 #include <cstdint>
 #include <limits>
 
@@ -53,6 +54,52 @@ double medianOf(std::vector<float>& v)
     return m;
 }
 
+
+// ---- small radix-2 FFT (analysis-time only) ------------------------------------------
+void fftInPlace(std::vector<std::complex<float>>& a)
+{
+    const size_t n = a.size();
+    for (size_t i = 1, j = 0; i < n; ++i)
+    {
+        size_t bit = n >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) std::swap(a[i], a[j]);
+    }
+    for (size_t len = 2; len <= n; len <<= 1)
+    {
+        const double ang = -2.0 * 3.14159265358979323846 / static_cast<double>(len);
+        const std::complex<float> wl(static_cast<float>(std::cos(ang)), static_cast<float>(std::sin(ang)));
+        for (size_t i = 0; i < n; i += len)
+        {
+            std::complex<float> w(1.f, 0.f);
+            for (size_t k = 0; k < len / 2; ++k)
+            {
+                const auto u = a[i + k], v = a[i + k + len / 2] * w;
+                a[i + k] = u + v;
+                a[i + k + len / 2] = u - v;
+                w *= wl;
+            }
+        }
+    }
+}
+
+/** Harmonic-sum salience of f0 (Hz) in a magnitude spectrum (bin width binHz). */
+float harmonicSalience(const std::vector<float>& mag, double binHz, double f0, int harmonics = 8)
+{
+    float sum = 0.f, w = 1.f;
+    for (int h = 1; h <= harmonics; ++h, w *= 0.84f)
+    {
+        const double b = h * f0 / binHz;
+        const int c = static_cast<int>(std::lround(b));
+        if (c + 1 >= static_cast<int>(mag.size())) break;
+        float m = 0.f;
+        for (int k = std::max(1, c - 1); k <= c + 1; ++k) m = std::max(m, mag[static_cast<size_t>(k)]);
+        sum += w * m;
+    }
+    return sum;
+}
+
 } // namespace
 
 AnalysisResult analyzeMonophonic(const float* mono, size_t numSamples, double sampleRate,
@@ -94,6 +141,7 @@ AnalysisResult analyzeMonophonic(const float* mono, size_t numSamples, double sa
     {
         float y;
         if (dec.push(mono[i], y)) x.push_back(y);
+        if ((i & 0xFFFFu) == 0 && !report(0.02f * static_cast<float>(i) / static_cast<float>(numSamples))) return result;
     }
     const size_t nDec = x.size() - static_cast<size_t>(pad);
     x.resize(x.size() + static_cast<size_t>(bufLen), 0.f);
@@ -166,6 +214,29 @@ AnalysisResult analyzeMonophonic(const float* mono, size_t numSamples, double sa
             if (!found) globalProb += static_cast<float>(thrW[static_cast<size_t>(k)] * 0.01);
         }
 
+        // Real voices: the dip at the true period is often a little shallower than the one at
+        // twice (three times) the period, so low thresholds pick the sub-octave. Hand such a
+        // minimum's probability to the dip near half (a third of) its lag when that dip is
+        // almost as deep.
+        if (s.octaveSlack > 0.0)
+        {
+            for (int m = nMins - 1; m >= 0; --m)
+            {
+                if (probs[m] <= 0.f) continue;
+                for (int div : { 2, 3 })
+                {
+                    const double want = static_cast<double>(mins[m]) / div;
+                    int best = -1;
+                    for (int m2 = 0; m2 < m; ++m2)
+                        if (std::abs(mins[m2] - want) <= std::max(1.5, 0.04 * want)
+                            && cm[static_cast<size_t>(mins[m2])] < cm[static_cast<size_t>(mins[m])] + static_cast<float>(s.octaveSlack)
+                            && cm[static_cast<size_t>(mins[m2])] < 0.5f)
+                            best = m2;
+                    if (best >= 0) { probs[best] += probs[m]; probs[m] = 0.f; break; }
+                }
+            }
+        }
+
         auto addCandidate = [&](int tau, float p) {
             if (p <= 1e-6f) return;
             const double period = yin::parabolicMin(diff.data(), maxLag + 1, tau);
@@ -202,10 +273,18 @@ AnalysisResult analyzeMonophonic(const float* mono, size_t numSamples, double sa
             logTri[static_cast<size_t>(d)] = static_cast<float>(std::log((1.0 - pSw) * 0.999 * (J + 1 - d) / norm));
     }
     const float logFloor = static_cast<float>(std::log((1.0 - pSw) * 0.001 / B));
-    const float logVtoU = static_cast<float>(std::log(pSw));
-    const float logUtoU = static_cast<float>(std::log(1.0 - pSw));
-    const float logUtoV = static_cast<float>(std::log(pSw / B));
+    // The unvoiced state behaves like pYIN's unvoiced copies of every pitch bin: it keeps
+    // tracking a hidden pitch, so it pays the same per-frame "stay on this pitch" cost as a
+    // voiced bin. (Without that, every voiced frame paid ~log(31/961) more than an unvoiced
+    // one and real, reverberant vocals decoded as mostly unvoiced.)
+    double triNorm = 0.0;
+    for (int d = -J; d <= J; ++d) triNorm += (J + 1 - std::abs(d));
+    const double stay = 0.999 * (J + 1) / triNorm;
+    const float logVtoU = static_cast<float>(std::log(pSw * stay));
+    const float logUtoU = static_cast<float>(std::log((1.0 - pSw) * stay));
+    const float logUtoV = static_cast<float>(std::log(pSw * stay));
     constexpr float kEps = 1e-7f;
+    const float uWeight = static_cast<float>(std::clamp(s.unvoicedWeight, 1e-3, 1.0));
 
     std::vector<float> delta(static_cast<size_t>(S)), next(static_cast<size_t>(S)), obs(static_cast<size_t>(S));
     std::vector<int16_t> back(numFrames * static_cast<size_t>(S));
@@ -221,7 +300,7 @@ AnalysisResult analyzeMonophonic(const float* mono, size_t numSamples, double sa
             obs[static_cast<size_t>(b)] += cd.prob;
             vp += cd.prob;
         }
-        obs[static_cast<size_t>(U)] = std::max(kEps, 1.f - std::min(vp, 1.f));
+        obs[static_cast<size_t>(U)] = std::max(kEps, uWeight * (1.f - std::min(vp, 1.f)));
         for (auto& o : obs) o = std::log(o);
     };
 
@@ -300,10 +379,224 @@ AnalysisResult analyzeMonophonic(const float* mono, size_t numSamples, double sa
         fr.midi = static_cast<float>(bestMidi);
     }
 
+    if (s.removeSpikes) removePitchSpikes(result.frames);
+
+    // ---- spectral pass: harmonic-salience correction of period-multiple errors, and the
+    //      second-voice check (harmonic cancellation) --------------------------------------
+    if (s.salienceCorrection || s.detectHarmonies)
+    {
+        constexpr size_t N = 1024;
+        const double binHz = r / static_cast<double>(N);
+        std::vector<float> win(N), mag(N / 2), resid(N / 2);
+        for (size_t i = 0; i < N; ++i) win[i] = static_cast<float>(0.5 - 0.5 * std::cos(2.0 * 3.14159265358979323846 * i / (N - 1)));
+        std::vector<std::complex<float>> buf(N);
+        std::vector<double> candHz;
+        for (double m = minMidi; m <= maxMidi; m += 1.0 / 3.0) candHz.push_back(midiToHz(m));
+        auto salAround = [&](const std::vector<float>& sp, double hz) {
+            float best = 0.f;
+            for (double c : { 0.985, 1.0, 1.015 }) best = std::max(best, harmonicSalience(sp, binHz, hz * c));
+            return best;
+        };
+        size_t voicedCount = 0;
+        for (size_t f = 0; f < numFrames; ++f)
+        {
+            auto& fr = result.frames[f];
+            if (fr.midi <= 0.f) continue;
+            const bool checkAlt = s.detectHarmonies && (voicedCount & 3u) == 0;
+            ++voicedCount;
+            if (!s.salienceCorrection && !checkAlt) continue;
+            if ((voicedCount & 255u) == 1 && !report(0.93f + 0.05f * static_cast<float>(f) / numFrames)) return result;
+            const long centre = static_cast<long>(f * static_cast<size_t>(hop)) + pad;
+            const long start = centre - static_cast<long>(N / 2);
+            for (size_t i = 0; i < N; ++i)
+            {
+                const long idx = start + static_cast<long>(i);
+                const float v = (idx >= 0 && idx < static_cast<long>(x.size())) ? x[static_cast<size_t>(idx)] : 0.f;
+                buf[i] = { v * win[i], 0.f };
+            }
+            fftInPlace(buf);
+            for (size_t k = 0; k < N / 2; ++k) mag[k] = std::sqrt(std::abs(buf[k]));   // compressed magnitude
+            double f0 = midiToHz(fr.midi);
+            float primary = salAround(mag, f0);
+
+            for (int pass = 0; pass < 3 && s.salienceCorrection; ++pass)   // 66 Hz -> 264 -> 528 needs two
+            {
+                // YIN on mixtures / breathy voices can lock onto 2x, 3x or 4x the period. If a
+                // multiple of the decoded frequency (or half of it) explains the spectrum clearly
+                // better, move there.
+                double bestHz = f0;
+                float bestSal = primary * static_cast<float>(s.salienceSwitch);
+                for (double k : { 0.5, 2.0, 3.0, 4.0 })
+                {
+                    const double hz = f0 * k;
+                    if (hz < s.minHz || hz > s.maxHz) continue;
+                    const float sal = salAround(mag, hz) * (k == 0.5 ? 0.8f : 1.f);   // be shy of going down
+                    if (sal > bestSal) { bestSal = sal; bestHz = hz; }
+                }
+                if (bestHz == f0) break;
+                fr.midi = static_cast<float>(fr.midi + 12.0 * std::log2(bestHz / f0));
+                f0 = bestHz;
+                primary = salAround(mag, f0);
+            }
+            if (!checkAlt || primary <= 1e-9f) continue;
+
+            // Cancel the decoded voice's harmonics (and so its sub-octave, which shares them).
+            resid = mag;
+            for (int h = 1; h * f0 < 0.5 * r; ++h)
+            {
+                const int c = static_cast<int>(std::lround(h * f0 / binHz));
+                for (int k = std::max(0, c - 2); k <= std::min(static_cast<int>(N / 2) - 1, c + 2); ++k) resid[static_cast<size_t>(k)] = 0.f;
+            }
+            float best = 0.f;
+            double bestHz = 0.0;
+            for (double hz : candHz)
+            {
+                const double rel = 12.0 * std::log2(hz / f0);
+                if (std::abs(rel) < 0.6 || std::abs(rel + 12.0) < 0.6) continue;
+                const float sal = harmonicSalience(resid, binHz, hz);
+                if (sal > best) { best = sal; bestHz = hz; }
+            }
+            fr.altRatio = best / primary;
+            fr.altMidi = bestHz > 0.0 ? static_cast<float>(hzToMidi(bestHz)) : 0.f;
+        }
+        if (s.removeSpikes) removePitchSpikes(result.frames);
+    }
+
     // ---- 4-5. notes -------------------------------------------------------------------
     result.notes = segmentNotes(result.frames, hopSec, s);
+    if (s.fixOctaveErrors) fixOctaveErrors(result.notes);
+    if (s.detectHarmonies) markHarmonySuspects(result.notes, result.frames, hopSec, s);
     report(1.f);
     return result;
+}
+
+void removePitchSpikes(std::vector<AnalysisFrame>& frames)
+{
+    const size_t n = frames.size();
+    // Edges of voiced runs: 1-3 frames that jump >= 6 st away from the run are unvoiced.
+    for (size_t i = 0; i < n; ++i)
+    {
+        if (frames[i].midi <= 0.f || (i > 0 && frames[i - 1].midi > 0.f)) continue;
+        size_t e = i;
+        while (e < n && frames[e].midi > 0.f) ++e;       // run [i, e)
+        if (e - i < 8) { i = e; continue; }
+        for (int side = 0; side < 2; ++side)
+        {
+            for (size_t len = 3; len >= 1; --len)
+            {
+                const size_t a = side == 0 ? i : e - len;
+                const size_t ref = side == 0 ? i + len : e - len - 1;
+                bool off = true;
+                for (size_t k = a; k < a + len; ++k)
+                    if (std::abs(frames[k].midi - frames[ref].midi) < 6.f) { off = false; break; }
+                if (off) { for (size_t k = a; k < a + len; ++k) frames[k].midi = 0.f; break; }
+            }
+        }
+        i = e;
+    }
+    for (size_t i = 1; i + 1 < n; ++i)
+    {
+        if (frames[i].midi <= 0.f || frames[i - 1].midi <= 0.f) continue;
+        const float before = frames[i - 1].midi;
+        for (size_t len = 1; len <= 3 && i + len < n; ++len)
+        {
+            const float after = frames[i + len].midi;
+            if (after <= 0.f || std::abs(after - before) > 2.f) continue;
+            bool outlier = true;
+            for (size_t k = i; k < i + len; ++k)
+                if (frames[k].midi <= 0.f || std::abs(frames[k].midi - before) < 6.f || std::abs(frames[k].midi - after) < 6.f) { outlier = false; break; }
+            if (!outlier) continue;
+            for (size_t k = i; k < i + len; ++k)
+            {
+                const float t = static_cast<float>(k - i + 1) / static_cast<float>(len + 1);
+                frames[k].midi = before + t * (after - before);
+            }
+            i += len - 1;
+            break;
+        }
+    }
+}
+
+int fixOctaveErrors(NoteList& notes)
+{
+    int fixed = 0;
+    constexpr double kNear = 0.5; // neighbours must be within 0.5 s
+    for (size_t i = 0; i < notes.size(); ++i)
+    {
+        auto& n = notes[i];
+        if (n.length >= 0.8) continue;
+        const RefNote* prev = (i > 0 && n.start - notes[i - 1].end() <= kNear) ? &notes[i - 1] : nullptr;
+        const RefNote* next = (i + 1 < notes.size() && notes[i + 1].start - n.end() <= kNear) ? &notes[i + 1] : nullptr;
+        if (prev == nullptr || next == nullptr) continue;   // needs context on both sides
+        for (int shift : { 12, -12 })
+        {
+            const int cand = n.pitch + shift;
+            auto fits = [&](const RefNote* o) { return std::abs(o->pitch - cand) <= 4 && std::abs(o->pitch - n.pitch) >= 8; };
+            if (fits(prev) && fits(next) && cand >= 0 && cand <= 127)
+            {
+                n.pitch = cand;
+                ++fixed;
+                break;
+            }
+        }
+    }
+    return fixed;
+}
+
+int markHarmonySuspects(NoteList& notes, const std::vector<AnalysisFrame>& frames, double hopSec,
+                        const AnalyzerSettings& s)
+{
+    int flagged = 0;
+    constexpr double kNear = 0.3;
+    for (size_t i = 0; i < notes.size(); ++i)
+    {
+        auto& n = notes[i];
+        bool suspect = false;
+
+        // (1) melodic excursion: a short hop away and straight back.
+        const RefNote* prev = (i > 0 && n.start - notes[i - 1].end() <= kNear) ? &notes[i - 1] : nullptr;
+        const RefNote* next = (i + 1 < notes.size() && notes[i + 1].start - n.end() <= kNear) ? &notes[i + 1] : nullptr;
+        if (n.length < 0.35 && prev != nullptr && next != nullptr && std::abs(prev->pitch - next->pitch) <= 2
+            && std::abs(n.pitch - prev->pitch) >= 5 && std::abs(n.pitch - next->pitch) >= 5)
+            suspect = true;
+
+        // (2) a second voice for most of the note.
+        if (!suspect && !frames.empty() && hopSec > 0.0)
+        {
+            const size_t a = static_cast<size_t>(std::max(0.0, std::floor(n.start / hopSec)));
+            const size_t b = std::min(frames.size(), static_cast<size_t>(std::ceil(n.end() / hopSec)));
+            int checked = 0, poly = 0, strongerAbove = 0, clearlyStronger = 0;
+            for (size_t f = a; f < b; ++f)
+            {
+                const auto& fr = frames[f];
+                if (fr.midi <= 0.f || fr.altMidi <= 0.f) continue;
+                ++checked;
+                if (fr.altRatio >= s.polyRatio)
+                {
+                    ++poly;
+                    if (fr.altRatio >= 1.0f && fr.altMidi > fr.midi + 2.5f) ++strongerAbove;
+                    if (fr.altRatio >= 1.25f) ++clearlyStronger;
+                }
+            }
+            if (checked >= 2)
+            {
+                const double pf = static_cast<double>(poly) / checked;
+                if (pf >= 0.5 && (static_cast<double>(strongerAbove) / checked >= 0.4 || static_cast<double>(clearlyStronger) / checked >= 0.5))
+                    suspect = true;
+            }
+        }
+
+        // (3) short and barely voiced.
+        if (!suspect && n.length < 0.25 && n.confidence < 0.15f) suspect = true;
+
+        if (suspect)
+        {
+            n.setFlag(RefNote::HarmonySuspect, true);
+            if (s.muteHarmonySuspects) n.setFlag(RefNote::Muted, true);
+            ++flagged;
+        }
+    }
+    return flagged;
 }
 
 NoteList segmentNotes(const std::vector<AnalysisFrame>& frames, double hopSec, const AnalyzerSettings& s)
@@ -337,7 +630,9 @@ NoteList segmentNotes(const std::vector<AnalysisFrame>& frames, double hopSec, c
         }
         scratch.clear();
         double conf = 0.0;
-        for (size_t i = a; i < b; ++i) { scratch.push_back(frames[i].midi); conf += frames[i].voicedProb; }
+        // Pitch from the voiced frames only (refined edges may add unvoiced frames).
+        for (size_t i = a; i < b; ++i) { if (frames[i].midi > 0.f) scratch.push_back(frames[i].midi); conf += frames[i].voicedProb; }
+        if (scratch.empty()) return;
         RefNote note;
         note.start = frames[a].time;
         note.length = frames[b - 1].time - frames[a].time + hopSec;

@@ -14,8 +14,18 @@ struct RefNote
     int pitch = 60;           // MIDI note number
     float confidence = 1.f;   // 0..1 (analyzer confidence; 1 for MIDI / hand-made notes)
     int velocity = 100;
+    uint8_t flags = 0;        // Flag bits below
+
+    enum Flag : uint8_t
+    {
+        Muted = 1u << 0,          // greyed out; excluded from scoring and live feedback
+        HarmonySuspect = 1u << 1, // analyzer/importer thinks this is a backing/harmony line
+    };
 
     double end() const noexcept { return start + length; }
+    bool muted() const noexcept { return (flags & Muted) != 0; }
+    bool harmonySuspect() const noexcept { return (flags & HarmonySuspect) != 0; }
+    void setFlag(Flag f, bool on) noexcept { flags = static_cast<uint8_t>(on ? (flags | f) : (flags & ~f)); }
 };
 
 using NoteList = std::vector<RefNote>;
