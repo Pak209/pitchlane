@@ -101,3 +101,16 @@ Harmonies:
 - [ ] Select notes and press **M** (and use the right-click menu): they grey out; again: unmute. *Mute/Unmute
       harmonies* toggles all flagged notes; *Remove muted notes* deletes them; ⌘Z restores.
 - [ ] Export MIDI: muted notes are not in the file. Save, reopen the project: muted notes are still muted.
+
+## 9. Analyze Vocal in Logic: result visible, errors, status dot, log (v0.3.1)
+Repro of the first Logic test (stem that starts ~15 s in, melody up to G5, Logic stopped at bar 1, default range C3–C5):
+- [ ] Load `0 Lead Vocals.m4a` from the project's *Audio Files* folder and click **ANALYZE VOCAL**: the progress card
+      and **CANCEL nn%** are visible; afterwards the hint bar says "N notes found (M muted as harmony) · showing bar …",
+      the roll shows the first phrase (about 8 bars), and Vocal range was widened to cover the top note.
+- [ ] Set a custom range first (e.g. D3–D5), analyze again: the range is kept and **Expand range to …** is offered.
+- [ ] Scroll back to bar 1: the "N reference notes, none in this view" card appears; clicking it or **Go to notes** returns.
+- [ ] Reference offset +2000 ms: the notes and **Go to notes** move 2 s later.
+- [ ] Analyze a silent file: red "No notes found …" message in the hint bar and on the roll (click to dismiss).
+- [ ] Status dot: stopped with the track selected = **amber**, playing = **green**, stopped with another track selected
+      (Logic stops calling the plug-in) = **grey** with a tooltip explaining why; Logic Sync off = hollow grey.
+- [ ] `~/Library/Logs/PitchLane/pitchlane.log` exists and shows the load, decode and analyze timings and the note count.

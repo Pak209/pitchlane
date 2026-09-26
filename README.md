@@ -110,11 +110,11 @@ In Logic the plug-in is under **Audio FX > Audio Units > Pak209 > Pitch Lane**.
 | Control | What it does |
 |---|---|
 | **Reference:** field / folder | Choose the isolated lead-vocal stem (or drag an audio / MIDI file onto the window). Orange "(missing)" = the file moved; the notes are saved in the project and still work. |
-| **ANALYZE VOCAL** | Turns the stem into editable reference notes in the background. While it runs the button shows **CANCEL nn%**. |
+| **ANALYZE VOCAL** | Turns the stem into editable reference notes in the background. While it runs the button shows **CANCEL nn%** and a progress card sits in the middle of the roll. When it finishes, the hint bar says what it found (e.g. "153 notes found (29 muted as harmony) · showing bar 9"), the roll jumps to the first sung note (about 8 bars) and the pitch window covers the melody. If the vocal range is still the default C3–C5 it is widened to fit the notes; a range you set yourself is kept and an **Expand range to …** button is offered instead. No notes / a file that can't be read gives a red message in the hint bar and on the roll. |
 | **Key** | Key and scale (e.g. "A minor"): used by the *Scales* guide and the row shading. |
 | **BPM** | Shows Logic's tempo while *Logic Sync* is on. With sync off (or no host tempo) it is the manual tempo: drag, scroll, pick from the menu or double-click to type. Its menu also sets the manual **time signature** (2/4 … 12/8). |
 | **LOGIC SYNC** | On (default): follow Logic's transport, position and tempo. Off: ignore the host and run a free clock at the manual BPM. |
-| Status dot | Green = synced to the host transport (brighter while playing), amber = sync on but the host sends no timeline, grey = sync off. |
+| Status dot | **Green** = Logic playing (synced). **Amber** = Logic stopped (synced; live pitch is compared with the note under Logic's playhead). **Grey** = no transport info from Logic: Logic only runs a plug-in while it plays or while its track is selected / record-armed, so a stopped, unselected track sends nothing (the BPM then shows the manual tempo until you press play). Hollow grey = Logic Sync off. Hover for details. |
 | ⚙ Settings | Note names (Middle C = C4 / C3 as in Logic), timing calibration, **timing tolerance** (on-time window, default ±80 ms), input gate, clarity, visible time, follow playhead, Import / Export MIDI, **Mute / Unmute harmonies**, **Remove muted**, Undo / Redo, Select all, edit buttons for the selection (Delete, Mute, ±1 st, ±10 ms), Clear notes, section markers, Clear trace, Restart clock. |
 
 **Bottom bar** (each title has an ⓘ tooltip): **Reference offset** (ms, moves the reference notes against the song; arrows
@@ -128,7 +128,10 @@ mouse wheel and double-click-to-type.
 (the target note is marked lavender, the sung note tinted), reference notes as lavender bars, and your live line in
 cyan. Where you are outside the tolerance on a note, the line and that part of the note turn orange-red (the first
 100 ms of each note are not judged, so scoops into a note aren't flagged). The loop region is shaded when Logic's
-Cycle is on. The view follows the playhead and zooms vertically to the current phrase inside the vocal range.
+Cycle is on. The view follows the playhead while playing and zooms vertically to the current phrase inside the vocal
+range. **Go to notes** (hint bar, or click the "notes outside this view" card) scrolls and zooms to the first reference
+note. Reference notes sit at *file time + Reference offset* on Logic's timeline, so a stem that starts at Logic's
+project start lines up with offset 0; if the region starts later, set the offset to that position.
 Rows in the key are shaded faintly in *Notes* mode and strongly in *Scales* mode.
 
 **Take feedback.** After each reference note, a tick marks where you came in: **green** = on time (within the timing
@@ -165,6 +168,13 @@ Colours: **cyan** = in tune (or no target at that moment), **orange-red** = outs
 
 **Audio formats for Analyze Vocal:** WAV, AIFF, FLAC, Ogg and MP3, plus M4A (AAC / Apple Lossless) and CAF on macOS
 through Core Audio. Stereo files are mixed to mono. Any sample rate works. Files up to 20 minutes.
+
+### Diagnostics log
+
+Pitch Lane writes a small log to **`~/Library/Logs/PitchLane/pitchlane.log`** (open it with Console.app, or
+`open ~/Library/Logs/PitchLane/`): plug-in version and build, host, when a vocal is loaded, decode / analysis timings,
+note counts, where the view was fitted, the transport state and any error. It rotates at about 1 MB and holds no
+audio. Please attach it when reporting a problem.
 
 ---
 
