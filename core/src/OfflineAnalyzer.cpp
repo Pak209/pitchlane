@@ -548,16 +548,58 @@ int markHarmonySuspects(NoteList& notes, const std::vector<AnalysisFrame>& frame
 {
     int flagged = 0;
     constexpr double kNear = 0.3;
+
+    // (0) range outlier: a short note far below (sub-harmonic / chord "missing fundamental")
+    // or far above (a jump to another voice) the melody around it, judged against the
+    // duration-weighted median pitch of the other notes within +-4 s.
+    std::vector<char> outlier(notes.size(), 0);
+    std::vector<double> localMedian(notes.size(), -1.0);   // -1 = not enough context
+    {
+        std::vector<std::pair<double, double>> ctx;   // (pitch, weight)
+        for (size_t i = 0; i < notes.size(); ++i)
+        {
+            const auto& n = notes[i];
+            ctx.clear();
+            double total = 0.0;
+            for (size_t j = 0; j < notes.size(); ++j)
+            {
+                if (j == i || notes[j].end() < n.start - 4.0 || notes[j].start > n.end() + 4.0) continue;
+                ctx.emplace_back(notes[j].pitch, notes[j].length);
+                total += notes[j].length;
+            }
+            if (ctx.size() < 3 || total < 1.0) continue;
+            std::sort(ctx.begin(), ctx.end());
+            double acc = 0.0, med = ctx.back().first;
+            for (const auto& c : ctx) { acc += c.second; if (acc >= 0.5 * total) { med = c.first; break; } }
+            localMedian[i] = med;
+            if (n.length < 0.5 && (n.pitch <= med - s.outlierBelow || n.pitch >= med + s.outlierAbove)) outlier[i] = 1;
+        }
+    }
+    // Nearest neighbours that are not range outliers.
+    auto neighbour = [&](size_t i, int dir) -> const RefNote* {
+        for (long j = static_cast<long>(i) + dir; j >= 0 && j < static_cast<long>(notes.size()); j += dir)
+        {
+            const auto& m = notes[static_cast<size_t>(j)];
+            const double gap = dir < 0 ? notes[i].start - m.end() : m.start - notes[i].end();
+            if (gap > kNear) return nullptr;
+            if (!outlier[static_cast<size_t>(j)]) return &m;
+        }
+        return nullptr;
+    };
+
     for (size_t i = 0; i < notes.size(); ++i)
     {
         auto& n = notes[i];
-        bool suspect = false;
+        bool suspect = outlier[i] != 0;
 
         // (1) melodic excursion: a short hop away and straight back.
-        const RefNote* prev = (i > 0 && n.start - notes[i - 1].end() <= kNear) ? &notes[i - 1] : nullptr;
-        const RefNote* next = (i + 1 < notes.size() && notes[i + 1].start - n.end() <= kNear) ? &notes[i + 1] : nullptr;
-        if (n.length < 0.35 && prev != nullptr && next != nullptr && std::abs(prev->pitch - next->pitch) <= 2
-            && std::abs(n.pitch - prev->pitch) >= 5 && std::abs(n.pitch - next->pitch) >= 5)
+        const RefNote* prev = neighbour(i, -1);
+        const RefNote* next = neighbour(i, +1);
+        if (!suspect && n.length < 0.35 && prev != nullptr && next != nullptr && std::abs(prev->pitch - next->pitch) <= 2
+            && std::abs(n.pitch - prev->pitch) >= 5 && std::abs(n.pitch - next->pitch) >= 5
+            // ... unless the note is the one that fits the melody around it (the neighbours
+            // are the excursion, e.g. a harmony line taking over around a lead note).
+            && (localMedian[i] < 0.0 || std::abs(n.pitch - localMedian[i]) > std::abs(prev->pitch - localMedian[i])))
             suspect = true;
 
         // (2) a second voice for most of the note.
@@ -681,8 +723,23 @@ NoteList segmentNotes(const std::vector<AnalysisFrame>& frames, double hopSec, c
     sortNotes(notes);
     mergeSamePitchGaps(notes, s.mergeGapMs * 0.001);
     removeShortNotes(notes, s.minNoteMs * 0.001);
+    // Drop weakly voiced notes, but keep a steady-pitch one (breaths and consonants never hold
+    // a pitch; a soft sung note under other voices does, even when YIN calls it aperiodic).
+    auto steadyPitch = [&](const RefNote& nt) {
+        if (s.steadyRescueCents <= 0.0 || nt.length < 0.15) return false;
+        const size_t a = static_cast<size_t>(std::max(0.0, std::floor(nt.start / hopSec)));
+        const size_t b = std::min(frames.size(), static_cast<size_t>(std::ceil(nt.end() / hopSec)));
+        scratch.clear();
+        for (size_t f = a; f < b; ++f)
+            if (frames[f].midi > 0.f) scratch.push_back(std::abs(frames[f].midi - static_cast<float>(nt.pitch)));
+        if (b <= a || scratch.size() < 0.8 * static_cast<double>(b - a)) return false;
+        return medianOf(scratch) * 100.0 < s.steadyRescueCents;
+    };
     notes.erase(std::remove_if(notes.begin(), notes.end(),
-                               [&](const RefNote& nt) { return nt.confidence < s.minConfidence; }),
+                               [&](const RefNote& nt) {
+                                   return nt.confidence < s.minConfidence
+                                          && !(nt.confidence >= 0.5 * s.minConfidence && steadyPitch(nt));
+                               }),
                 notes.end());
     mergeSamePitchGaps(notes, s.mergeGapMs * 0.001);
     return notes;

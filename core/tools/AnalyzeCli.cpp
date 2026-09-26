@@ -29,10 +29,15 @@ static bool applySetting(AnalyzerSettings& s, const std::string& kv)
         { "splitCents", &s.splitCents }, { "splitHoldMs", &s.splitHoldMs }, { "edgeRefineMs", &s.edgeRefineMs },
         { "edgeRefineDb", &s.edgeRefineDb }, { "voicingSwitchProb", &s.voicingSwitchProb },
         { "unvoicedWeight", &s.unvoicedWeight }, { "octaveSlack", &s.octaveSlack },
-        { "polyRatio", &s.polyRatio }, { "salienceSwitch", &s.salienceSwitch } };
+        { "polyRatio", &s.polyRatio }, { "salienceSwitch", &s.salienceSwitch },
+        { "steadyRescueCents", &s.steadyRescueCents } };
     if (auto it = d.find(k); it != d.end()) { *it->second = v; return true; }
     if (k == "binsPerSemitone") { s.binsPerSemitone = static_cast<int>(v); return true; }
     if (k == "maxJumpBins") { s.maxJumpBins = static_cast<int>(v); return true; }
+    if (k == "outlierBelow") { s.outlierBelow = static_cast<int>(v); return true; }
+    if (k == "outlierAbove") { s.outlierAbove = static_cast<int>(v); return true; }
+    if (k == "muteHarmonySuspects") { s.muteHarmonySuspects = v != 0.0; return true; }
+    if (k == "detectHarmonies") { s.detectHarmonies = v != 0.0; return true; }
     return false;
 }
 

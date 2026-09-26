@@ -34,6 +34,8 @@ struct AnalyzerSettings
     double minNoteMs = 80.0;
     double mergeGapMs = 60.0;
     double minConfidence = 0.05;     // mean voicing probability of a note (stems with backing: often 0.05-0.3)
+    double steadyRescueCents = 35.0; // keep a note down to minConfidence/2 if >= 150 ms, >= 80 % voiced and its
+                                     // frames stay within this median deviation of the note pitch (0 = off)
     double splitCents = 60.0;
     double splitHoldMs = 60.0;
     double edgeRefineMs = 80.0;      // max onset/offset adjustment from the energy envelope
@@ -53,6 +55,10 @@ struct AnalyzerSettings
     bool detectHarmonies = true;     // spectral check for a second voice + melodic excursions
     bool muteHarmonySuspects = true; // suspects start muted (greyed, excluded from scoring)
     double polyRatio = 0.8;
+    // Range outliers: a note shorter than 0.5 s this many semitones below / above the
+    // duration-weighted median of the notes within +-4 s is flagged as a harmony suspect.
+    int outlierBelow = 9;
+    int outlierAbove = 12;
     double octaveSlack = 0.1;        // move a candidate to the dip at 1/2 or 1/3 of its lag when
                                      // that dip is within this much (CMND units); 0 = off          // secondary/primary harmonic salience that counts as a 2nd voice
 };

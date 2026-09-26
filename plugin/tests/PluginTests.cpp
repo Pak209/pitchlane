@@ -878,3 +878,35 @@ TEST_CASE("Formats (macOS): M4A/AAC, M4A/ALAC, CAF and AIFF made with afconvert 
     src.deleteFile();
 }
 #endif
+
+TEST_CASE("Formats: optional local files via PITCHLANE_EXTRA_AUDIO (not in CI)")
+{
+    // Developer hook for trying real recordings through the plugin's own loader without
+    // committing them: PITCHLANE_EXTRA_AUDIO=/path/a.m4a:/path/b.wav PitchLaneTests
+    const auto list = juce::SystemStats::getEnvironmentVariable("PITCHLANE_EXTRA_AUDIO", {});
+    if (list.isEmpty()) return;
+    juce::AudioFormatManager fm;
+    fm.registerBasicFormats();
+    for (const auto& path : juce::StringArray::fromTokens(list, ":", {}))
+    {
+        const juce::File f(path);
+        const auto t0 = juce::Time::getMillisecondCounterHiRes();
+        const auto d = decodeToMono(fm, f, AnalysisManager::kMaxSeconds);
+        const auto t1 = juce::Time::getMillisecondCounterHiRes();
+        if (!d.ok())
+        {
+            std::printf("    %s: %s\n", f.getFileName().toRawUTF8(), d.error.toRawUTF8());
+            CHECK(d.error.startsWith("Unsupported file type"));   // e.g. AAC off macOS
+            continue;
+        }
+        const auto ar = analyzeMonophonic(d.mono.data(), d.mono.size(), d.sampleRate, {});
+        const auto t2 = juce::Time::getMillisecondCounterHiRes();
+        int suspects = 0;
+        for (const auto& n : ar.notes) suspects += n.harmonySuspect() ? 1 : 0;
+        std::printf("    %s: %s, %.0f Hz, %d ch, %.2f s; decode %.0f ms, analyze %.0f ms; %d notes, %d harmony suspects\n",
+                    f.getFileName().toRawUTF8(), d.formatName.toRawUTF8(), d.sampleRate, d.numChannels,
+                    static_cast<double>(d.mono.size()) / d.sampleRate, t1 - t0, t2 - t1,
+                    static_cast<int>(ar.notes.size()), suspects);
+        CHECK(!ar.notes.empty());
+    }
+}
