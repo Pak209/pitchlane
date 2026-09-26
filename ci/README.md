@@ -24,3 +24,10 @@ Install the downloaded component by following the steps in the main README (quar
 
 Note: pushing changes to files under `.github/workflows/` needs a token with the `workflow` scope
 (`gh auth refresh -h github.com -s workflow`).
+
+## Release workflow
+
+[`.github/workflows/release.yml`](../.github/workflows/release.yml) builds the signed, notarized installer
+(`PitchLane-<version>.pkg`) and publishes it on GitHub Releases when a `v*` tag is pushed. Manual runs:
+`dry_run` (default, no secrets, unsigned test pkg) and `sign_only` (signed + notarized pkg as an artifact, no
+release). Helper scripts live in [`ci/release/`](release). Full instructions: [docs/RELEASING.md](../docs/RELEASING.md).

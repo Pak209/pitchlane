@@ -40,10 +40,27 @@ cmake --build build --target PitchLane_AU PitchLane_Standalone
 
 Output: `build/plugin/PitchLane_artefacts/Release/AU/PitchLane.component` (and a Standalone app next to it).
 Options: `-DPITCHLANE_VST3=ON` adds VST3. `-DPITCHLANE_COPY_AFTER_BUILD=ON` installs automatically after each build.
+`-DPITCHLANE_DISTRIBUTION=ON` is what the release workflow uses: it refuses the copy step, because that step
+ad-hoc signs the bundle (the release is signed with Developer ID instead).
 
 ### Install
 
-The exact install path is:
+**Easiest: the signed installer.** Download `PitchLane-<version>.pkg` from
+[GitHub Releases](https://github.com/Pak209/pitchlane/releases) and double-click it. The package is signed with
+Dan Kimoto's Developer ID and notarized by Apple, so Gatekeeper opens it without warnings. It installs
+**system-wide**, for every user of the Mac, to
+
+```
+/Library/Audio/Plug-Ins/Components/PitchLane.component
+```
+
+and therefore **asks for an administrator password**. Restart Logic afterwards; Pitch Lane is under
+Audio FX > Audio Units > Pak209 > Pitch Lane. To uninstall, delete that folder
+(`sudo rm -rf /Library/Audio/Plug-Ins/Components/PitchLane.component`) and run
+`sudo pkgutil --forget com.dkimoto.pitchlane.pkg`. How releases are built: [docs/RELEASING.md](docs/RELEASING.md).
+
+**Fallback: manual install for your user only** (no admin password, e.g. for your own builds or CI artifacts).
+Don't keep both copies: if you switch to the pkg, delete the `~/Library` one. The exact install path is:
 
 ```
 ~/Library/Audio/Plug-Ins/Components/PitchLane.component

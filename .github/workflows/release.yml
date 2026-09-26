@@ -1,0 +1,295 @@
+name: Release (signed + notarized pkg)
+
+# Modes (resolved in the first step):
+#   release  push of a v* tag (or a manual run on a v* tag with dry_run=false, sign_only=false):
+#            build, test, auval, Developer ID sign, pkg, notarize, staple, verify, GitHub Release.
+#   sign     manual run with sign_only=true: everything above except the GitHub Release; the
+#            signed, notarized pkg is uploaded as a workflow artifact.
+#   dry      manual run with dry_run=true (default): no secrets needed; builds, tests, auval,
+#            builds an UNSIGNED pkg (component ad-hoc signed), test-installs it, uploads it.
+# Secrets: see docs/RELEASING.md. They are only read by the steps that need them and never echoed.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run: skip signing, notarization and the GitHub Release (unsigned pkg artifact)'
+        type: boolean
+        default: true
+      sign_only:
+        description: 'Sign + notarize + verify, upload the signed pkg as an artifact, but do not publish a release (overrides dry_run)'
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash   # -eo pipefail
+
+jobs:
+  release:
+    runs-on: macos-14
+    timeout-minutes: 90
+    permissions:
+      contents: write   # only used by the "Publish GitHub Release" step (release mode)
+    env:
+      COMPONENT: build/plugin/PitchLane_artefacts/Release/AU/PitchLane.component
+      DIST: dist
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve mode and version
+        id: mode
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+          IN_DRY: ${{ inputs.dry_run }}
+          IN_SIGN: ${{ inputs.sign_only }}
+        run: |
+          proj=$(sed -nE 's/^project\(PitchLane VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' CMakeLists.txt)
+          [ -n "$proj" ] || { echo "::error::Could not read project(PitchLane VERSION x.y.z) from CMakeLists.txt"; exit 1; }
+          is_tag=false; [[ "$REF" == refs/tags/v* ]] && is_tag=true
+          if [ "$EVENT" = "push" ] && $is_tag; then mode=release
+          elif [ "$EVENT" = "workflow_dispatch" ]; then
+            if [ "$IN_SIGN" = "true" ]; then mode=sign
+            elif [ "$IN_DRY" = "true" ]; then mode=dry
+            elif $is_tag; then mode=release
+            else echo "::error::A real release needs a v* tag. Push a tag (git tag v$proj && git push origin v$proj), run on a tag ref, or use dry_run / sign_only."; exit 1
+            fi
+          else echo "::error::Unexpected trigger $EVENT $REF"; exit 1
+          fi
+          if [ "$mode" = "release" ]; then
+            version="${REF_NAME#v}"
+            core="${version%%-*}"
+            [ "$core" = "$proj" ] || { echo "::error::Tag $REF_NAME (version $core) does not match project(PitchLane VERSION $proj) in CMakeLists.txt. Bump the project version first so the Audio Unit reports the same version."; exit 1; }
+            pkg_version="$core"
+          else
+            version="${proj}-dev.${GITHUB_SHA::7}"
+            pkg_version="$proj"
+          fi
+          {
+            echo "mode=$mode"
+            echo "version=$version"
+            echo "pkg_version=$pkg_version"
+            echo "pkg=PitchLane-$version.pkg"
+          } >> "$GITHUB_OUTPUT"
+          echo "Mode: $mode, version: $version (pkg version $pkg_version)"
+          echo "### Pitch Lane release: mode **$mode**, version \`$version\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check signing secrets
+        env:
+          MACOS_DEVID_APP_P12_BASE64: ${{ secrets.MACOS_DEVID_APP_P12_BASE64 }}
+          MACOS_DEVID_APP_P12_PASSWORD: ${{ secrets.MACOS_DEVID_APP_P12_PASSWORD }}
+          MACOS_DEVID_INSTALLER_P12_BASE64: ${{ secrets.MACOS_DEVID_INSTALLER_P12_BASE64 }}
+          MACOS_DEVID_INSTALLER_P12_PASSWORD: ${{ secrets.MACOS_DEVID_INSTALLER_P12_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          ASC_API_KEY_P8_BASE64: ${{ secrets.ASC_API_KEY_P8_BASE64 }}
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: ci/release/check_secrets.sh "${{ steps.mode.outputs.mode }}"
+
+      - name: Tools
+        run: |
+          sw_vers
+          xcodebuild -version
+          command -v ninja || brew install ninja
+          cmake --version
+
+      - name: Configure (Release, universal, distribution)
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+          -DPITCHLANE_DISTRIBUTION=ON
+          -DPITCHLANE_COPY_AFTER_BUILD=OFF
+          -DPITCHLANE_STANDALONE=OFF
+
+      - name: Build AU + tests
+        run: cmake --build build --target PitchLane_AU pitchlane_core_tests PitchLaneTests
+
+      - name: Unit tests
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Inspect bundle
+        run: |
+          lipo -info "$COMPONENT/Contents/MacOS/PitchLane"
+          lipo -info "$COMPONENT/Contents/MacOS/PitchLane" | grep -q arm64
+          lipo -info "$COMPONENT/Contents/MacOS/PitchLane" | grep -q x86_64
+          plutil -p "$COMPONENT/Contents/Info.plist" | grep -A12 AudioComponents
+
+      - name: Signature gate (no ad-hoc seal on the build output)
+        run: ci/release/check_signature.sh pre "$COMPONENT"
+
+      - name: auval (on an ad-hoc signed copy in ~/Library)
+        run: |
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          rm -rf ~/Library/Audio/Plug-Ins/Components/PitchLane.component
+          ditto "$COMPONENT" ~/Library/Audio/Plug-Ins/Components/PitchLane.component
+          codesign --force --deep -s - ~/Library/Audio/Plug-Ins/Components/PitchLane.component
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+          sleep 2
+          set +e
+          auval -v aufx Plne Pk20 | tee auval-build.log
+          status=${PIPESTATUS[0]}
+          set -e
+          grep -q "AU VALIDATION SUCCEEDED" auval-build.log || { echo "::error::auval failed (exit $status)"; exit 1; }
+          [ "$status" -eq 0 ] || { echo "::error::auval exit code $status"; exit 1; }
+
+      - name: Signature gate self-test (must reject an ad-hoc bundle)
+        if: steps.mode.outputs.mode == 'dry'
+        run: |
+          adhoc=~/Library/Audio/Plug-Ins/Components/PitchLane.component
+          if ci/release/check_signature.sh pre "$adhoc"; then echo "::error::pre gate accepted an ad-hoc sealed bundle"; exit 1; fi
+          if ci/release/check_signature.sh post "$adhoc" ABCDE12345; then echo "::error::post gate accepted an ad-hoc bundle"; exit 1; fi
+          echo "Self-test OK: both gates reject the ad-hoc copy (the ::error lines above are expected)."
+
+      - name: Stage component
+        run: |
+          rm -rf "$DIST" && mkdir -p "$DIST/stage"
+          ditto "$COMPONENT" "$DIST/stage/PitchLane.component"
+
+      - name: Import signing certificates (temporary keychain)
+        if: steps.mode.outputs.mode != 'dry'
+        env:
+          MACOS_DEVID_APP_P12_BASE64: ${{ secrets.MACOS_DEVID_APP_P12_BASE64 }}
+          MACOS_DEVID_APP_P12_PASSWORD: ${{ secrets.MACOS_DEVID_APP_P12_PASSWORD }}
+          MACOS_DEVID_INSTALLER_P12_BASE64: ${{ secrets.MACOS_DEVID_INSTALLER_P12_BASE64 }}
+          MACOS_DEVID_INSTALLER_P12_PASSWORD: ${{ secrets.MACOS_DEVID_INSTALLER_P12_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          ASC_API_KEY_P8_BASE64: ${{ secrets.ASC_API_KEY_P8_BASE64 }}
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: ci/release/keychain.sh setup
+
+      - name: Codesign component (Developer ID Application, hardened runtime)
+        if: steps.mode.outputs.mode != 'dry'
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          codesign --force --options runtime --timestamp \
+            --sign "$APP_IDENTITY" --keychain "$SIGN_KEYCHAIN" \
+            "$DIST/stage/PitchLane.component"
+          ci/release/check_signature.sh post "$DIST/stage/PitchLane.component" "$APPLE_TEAM_ID"
+
+      - name: Ad-hoc sign component (dry run only, so the test pkg loads locally)
+        if: steps.mode.outputs.mode == 'dry'
+        run: |
+          codesign --force -s - "$DIST/stage/PitchLane.component"
+          echo "::notice::Dry run: component is ad-hoc signed and the pkg is UNSIGNED and not notarized. Test only."
+
+      - name: Build pkg (pkgbuild + productbuild, productsign when signing)
+        run: |
+          identity=""
+          if [ "${{ steps.mode.outputs.mode }}" != "dry" ]; then identity="$INSTALLER_IDENTITY"; fi
+          ci/release/build_pkg.sh "$DIST/stage/PitchLane.component" "${{ steps.mode.outputs.pkg_version }}" \
+            "$DIST/${{ steps.mode.outputs.pkg }}" "$identity"
+
+      - name: Notarize + staple
+        if: steps.mode.outputs.mode != 'dry'
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+        run: ci/release/notarize.sh "$DIST/${{ steps.mode.outputs.pkg }}"
+
+      - name: Verify pkg and component signatures
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          PKG: ${{ env.DIST }}/${{ steps.mode.outputs.pkg }}
+        run: |
+          echo "--- pkgutil --check-signature"
+          pkgutil --check-signature "$PKG" | tee pkg-signature.txt || true
+          if [ "${{ steps.mode.outputs.mode }}" = "dry" ]; then
+            echo "::notice::Dry run: pkg is intentionally unsigned."
+            codesign --verify --deep --strict --verbose=2 "$DIST/stage/PitchLane.component"
+            exit 0
+          fi
+          grep -q "Developer ID Installer:" pkg-signature.txt || { echo "::error::pkg is not signed with Developer ID Installer"; exit 1; }
+          grep -q "signed by a developer certificate issued by Apple for distribution" pkg-signature.txt || { echo "::error::pkg signature status is not 'Developer ID for distribution'"; exit 1; }
+          grep -q "Notarization: trusted by the Apple notary service" pkg-signature.txt || echo "::warning::pkgutil did not report the notarization ticket"
+          echo "--- spctl -a -vv -t install"
+          spctl -a -vv -t install "$PKG" 2>&1 | tee spctl.txt
+          grep -q "accepted" spctl.txt || { echo "::error::Gatekeeper rejected the pkg"; exit 1; }
+          grep -q "source=Notarized Developer ID" spctl.txt || { echo "::error::Gatekeeper does not see the pkg as notarized"; exit 1; }
+          echo "--- stapler validate"
+          xcrun stapler validate "$PKG"
+          echo "--- codesign --verify --deep --strict (staged component)"
+          codesign --verify --deep --strict --verbose=2 "$DIST/stage/PitchLane.component"
+          echo "--- component inside the pkg payload"
+          rm -rf "$RUNNER_TEMP/pl-expand"
+          pkgutil --expand-full "$PKG" "$RUNNER_TEMP/pl-expand"
+          inner=$(find "$RUNNER_TEMP/pl-expand" -type d -name PitchLane.component -print -quit)
+          ci/release/check_signature.sh post "$inner" "$APPLE_TEAM_ID"
+          { echo "### Gatekeeper"; echo '```'; cat spctl.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Test-install the pkg system-wide and re-run auval
+        env:
+          PKG: ${{ env.DIST }}/${{ steps.mode.outputs.pkg }}
+        run: |
+          rm -rf ~/Library/Audio/Plug-Ins/Components/PitchLane.component
+          sudo installer -pkg "$PKG" -target / -verboseR
+          ls -la /Library/Audio/Plug-Ins/Components/PitchLane.component/Contents/MacOS
+          pkgutil --pkg-info com.dkimoto.pitchlane.pkg
+          codesign -dv /Library/Audio/Plug-Ins/Components/PitchLane.component 2>&1 | grep -E "^(Identifier|Format|CodeDirectory|Signature|Authority|Timestamp)" || true
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+          sleep 2
+          set +e
+          auval -v aufx Plne Pk20 | tee auval-installed.log
+          status=${PIPESTATUS[0]}
+          set -e
+          grep -q "AU VALIDATION SUCCEEDED" auval-installed.log || { echo "::error::auval failed on the pkg-installed component (exit $status)"; exit 1; }
+          [ "$status" -eq 0 ] || { echo "::error::auval exit code $status"; exit 1; }
+
+      - name: Checksum + release notes
+        run: |
+          cd "$DIST"
+          shasum -a 256 "${{ steps.mode.outputs.pkg }}" > "${{ steps.mode.outputs.pkg }}.sha256"
+          cat "${{ steps.mode.outputs.pkg }}.sha256"
+          sed "s/{{VERSION}}/${{ steps.mode.outputs.version }}/g" ../ci/release/release-notes.md > release-notes.md
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: PitchLane-${{ steps.mode.outputs.version }}-${{ steps.mode.outputs.mode == 'dry' && 'UNSIGNED-dry-run' || 'signed-notarized' }}
+          path: |
+            ${{ env.DIST }}/*.pkg
+            ${{ env.DIST }}/*.sha256
+            ${{ env.DIST }}/release-notes.md
+            auval-*.log
+            notary-log.json
+            spctl.txt
+            pkg-signature.txt
+          if-no-files-found: warn
+
+      - name: Publish GitHub Release
+        if: steps.mode.outputs.mode == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.mode.outputs.version }}
+          PKG: ${{ steps.mode.outputs.pkg }}
+        run: |
+          cd "$DIST"
+          pre=(); [[ "$VERSION" == *-* ]] && pre=(--prerelease)
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" "$PKG" "$PKG.sha256" --clobber
+            gh release edit "$TAG" --title "Pitch Lane $VERSION" --notes-file release-notes.md "${pre[@]}"
+          else
+            gh release create "$TAG" "$PKG" "$PKG.sha256" --verify-tag \
+              --title "Pitch Lane $VERSION" --notes-file release-notes.md "${pre[@]}"
+          fi
+          gh release view "$TAG" --json url --jq .url
+
+      - name: Remove temporary keychain and decoded secrets
+        if: always()
+        run: ci/release/keychain.sh cleanup
