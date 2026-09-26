@@ -22,6 +22,8 @@ fail=0
 
 describe() { codesign -dvvv "$@" 2>&1 || true; }
 field() { sed -n "s/^$1=//p" <<<"$2" | head -1; }
+# The code-directory flags live on the "CodeDirectory v=... flags=0x20002(adhoc,linker-signed) ..." line.
+cdflags() { grep -oE 'flags=0x[0-9a-f]+\([^)]*\)' <<<"$1" | head -1 | sed 's/^flags=//' || true; }
 
 case "$mode" in
 pre)
@@ -29,7 +31,7 @@ pre)
     if grep -q "code object is not signed" <<<"$top"; then
         echo "bundle: unsigned (ok)"
     else
-        flags=$(field flags "$top")
+        flags=$(cdflags "$top")
         plist=$(grep -E '^Info.plist' <<<"$top" | head -1)
         echo "bundle: $flags; $plist; $(grep -E '^Sealed Resources' <<<"$top" | head -1)"
         if grep -q "Signature=adhoc" <<<"$top"; then
@@ -51,7 +53,7 @@ pre)
         d=$(describe --arch "$a" "$bin")
         if grep -q "code object is not signed" <<<"$d"; then echo "$a: unsigned (ok)"
         else
-            f=$(field flags "$d")
+            f=$(cdflags "$d")
             echo "$a: $f"
             if grep -q "Signature=adhoc" <<<"$d" && ! grep -q "linker-signed" <<<"$f"; then
                 err "$a slice carries a full ad-hoc signature ($f); expected unsigned or linker-signed."
@@ -64,7 +66,7 @@ post)
     team="${3:?team id}"
     for target in "bundle" $archs; do
         if [ "$target" = "bundle" ]; then d=$(describe "$comp"); else d=$(describe --arch "$target" "$bin"); fi
-        f=$(field flags "$d")
+        f=$(cdflags "$d")
         auth=$(grep -m1 '^Authority=' <<<"$d" | sed 's/^Authority=//')
         echo "$target: $f; Authority=$auth; $(grep -m1 -E '^Timestamp=' <<<"$d" || echo 'Timestamp=none')"
         if grep -q "Signature=adhoc" <<<"$d"; then err "$target: still ad-hoc signed"; fail=1; fi
