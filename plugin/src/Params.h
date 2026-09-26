@@ -23,6 +23,17 @@ inline constexpr const char* smoothing   = "smoothing";    // display smoothing 
 inline constexpr const char* guide       = "guide";        // 0 = Notes (reference melody), 1 = Scales (key/scale)
 inline constexpr const char* display     = "display";      // 0 = Both, 1 = Vocal only, 2 = Reference only
 inline constexpr const char* hostSync    = "hostSync";     // follow the host transport + tempo (Logic Sync)
+// Added in v0.3; parameter version hint 3.
+inline constexpr const char* timeSig     = "timeSig";      // manual time signature (used when not following the host)
+
+struct TimeSig { int num, den; };
+inline constexpr TimeSig timeSigChoices[] = { { 2, 4 }, { 3, 4 }, { 4, 4 }, { 5, 4 }, { 6, 8 }, { 7, 8 }, { 9, 8 }, { 12, 8 } };
+inline constexpr int numTimeSigChoices = static_cast<int>(sizeof(timeSigChoices) / sizeof(timeSigChoices[0]));
+inline constexpr int defaultTimeSigIndex = 2;   // 4/4
+inline TimeSig timeSigFromIndex(int i) noexcept
+{
+    return timeSigChoices[(i >= 0 && i < numTimeSigChoices) ? i : defaultTimeSigIndex];
+}
 
 enum class GuideMode { Notes = 0, Scales = 1 };
 enum class DisplayMode { Both = 0, Vocal = 1, Reference = 2 };

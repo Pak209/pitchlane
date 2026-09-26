@@ -61,9 +61,7 @@ PianoRoll::View PianoRoll::makeView() const
     const auto disp = static_cast<params::DisplayMode>(roundToInt(get(params::display)));
     v.showNotes = disp != params::DisplayMode::Vocal;
     v.showTrace = disp != params::DisplayMode::Reference;
-    v.grid.bpm = snap_.bpm > 1.0 ? snap_.bpm : 120.0;
-    v.grid.num = snap_.timeSigNum;
-    v.grid.den = snap_.timeSigDen;
+    v.tempo = &tempo_.map();
 
     auto b = getLocalBounds().toFloat();
     v.ruler = b.removeFromTop(kRulerH);
@@ -89,6 +87,7 @@ double PianoRoll::nowTime() const
 void PianoRoll::update()
 {
     snap_ = proc_.getTransport();
+    if (tempo_.update(snap_)) repaint();
 
     LiveFrame f;
     int drained = 0;
@@ -272,12 +271,14 @@ void PianoRoll::paint(Graphics& g)
     {
         const float y = v.yForMidi(n) - rowH * 0.5f;
         Colour c = isBlackKey(n) ? col::rollDark : col::roll;
+        const bool inScale = isInScale(n, v.key, v.scale);
+        const bool root = ((n - v.key) % 12 + 12) % 12 == 0;
         if (v.scalesGuide)
-        {
-            const bool inScale = isInScale(n, v.key, v.scale);
-            const bool root = ((n - v.key) % 12 + 12) % 12 == 0;
             c = root ? Colour(0xff222544) : inScale ? Colour(0xff1b2230) : Colour(0xff12161e);
-        }
+        else if (v.scale != ScaleType::Chromatic)
+            // Notes mode: a faint key hint (in-scale rows a touch lighter, the tonic tinted).
+            c = root ? c.interpolatedWith(Colour(0xff222544), 0.45f)
+                     : inScale ? c.brighter(0.06f) : c.darker(0.12f);
         g.setColour(c);
         g.fillRect(v.area.getX(), y, v.area.getWidth(), rowH);
         g.setColour(((n % 12) + 12) % 12 == 0 ? col::gridBar : col::gridRow);
@@ -298,17 +299,13 @@ void PianoRoll::paint(Graphics& g)
 
     // ---- beat / bar grid -------------------------------------------------------------------
     {
-        const double beat = v.grid.secondsPerBeat();
-        const int num = jmax(1, v.grid.num);
-        if (v.area.getWidth() / (v.span / beat) > 5.0)
+        const double beat = v.tempo->secondsPerBeatAt(v.start);
+        const bool beatsVisible = v.area.getWidth() / (v.span / beat) > 5.0;
+        for (const auto& l : v.tempo->beatLines(v.start, v.start + v.span))
         {
-            const auto first = static_cast<long long>(std::ceil(v.start / beat));
-            for (long long b = first; static_cast<double>(b) * beat <= v.start + v.span; ++b)
-            {
-                const float x = v.xForTime(static_cast<double>(b) * beat);
-                g.setColour(b % num == 0 ? col::gridBar : col::gridBeat);
-                g.drawVerticalLine(roundToInt(x), v.area.getY(), v.area.getBottom());
-            }
+            if (!l.downbeat && !beatsVisible) continue;
+            g.setColour(l.downbeat ? col::gridBar : col::gridBeat);
+            g.drawVerticalLine(roundToInt(v.xForTime(l.time)), v.area.getY(), v.area.getBottom());
         }
     }
 
@@ -517,15 +514,16 @@ void PianoRoll::paintRuler(Graphics& g, const View& v)
 
     g.saveState();
     g.reduceClipRegion(v.ruler.toNearestInt());
-    const double barSec = v.grid.secondsPerBar();
-    const double beat = v.grid.secondsPerBeat();
+    const auto bb = v.tempo->barBeatAt(v.start);
+    const double barSec = v.tempo->timeOfBar(bb.bar + 1) - v.tempo->timeOfBar(bb.bar);
     const float barPx = static_cast<float>(barSec / v.span * v.area.getWidth());
     int labelEvery = 1;
     while (barPx * labelEvery < 34.f && labelEvery < 64) labelEvery *= 2;
-    const int firstBar = jmax(1, v.grid.barAt(v.start));
-    for (int bar = firstBar; v.grid.barStart(bar) <= v.start + v.span; ++bar)
+    for (const auto& l : v.tempo->barLines(v.start - barSec, v.start + v.span))
     {
-        const float x = v.xForTime(v.grid.barStart(bar));
+        if (l.bar < 1) continue;
+        const int bar = l.bar;
+        const float x = v.xForTime(l.time);
         const bool labelled = (bar - 1) % labelEvery == 0;
         g.setColour(labelled ? col::textDim.withAlpha(0.7f) : col::gridBar);
         g.drawVerticalLine(roundToInt(x), v.ruler.getY() + (labelled ? 6.f : 14.f), v.ruler.getBottom());
@@ -536,15 +534,15 @@ void PianoRoll::paintRuler(Graphics& g, const View& v)
             g.drawText(String(bar), Rectangle<float>(x + 6.f, v.ruler.getY(), 40.f, v.ruler.getHeight()),
                        Justification::centredLeft, false);
         }
-        // beat ticks
-        if (barPx > 40.f)
-            for (int b = 1; b < jmax(1, v.grid.num); ++b)
-            {
-                const float bx = v.xForTime(v.grid.barStart(bar) + b * beat);
-                g.setColour(col::gridBar);
-                g.drawVerticalLine(roundToInt(bx), v.ruler.getBottom() - 5.f, v.ruler.getBottom());
-            }
     }
+    // beat ticks
+    if (barPx > 40.f)
+        for (const auto& l : v.tempo->beatLines(v.start, v.start + v.span))
+            if (!l.downbeat)
+            {
+                g.setColour(col::gridBar);
+                g.drawVerticalLine(roundToInt(v.xForTime(l.time)), v.ruler.getBottom() - 5.f, v.ruler.getBottom());
+            }
     g.restoreState();
 }
 
@@ -857,7 +855,7 @@ void PianoRoll::mouseUp(const MouseEvent& e)
             // Option-click: a one-beat note at the click.
             RefNote n;
             n.start = jmax(0.0, v.timeForX(e.position.x) - v.offset);
-            n.length = v.grid.secondsPerBeat();
+            n.length = v.tempo->secondsPerBeatAt(n.start + v.offset);
             n.pitch = jlimit(0, 127, roundToInt(v.midiForY(e.position.y)) - v.transpose);
             n.confidence = 1.f;
             model.addNote(n);

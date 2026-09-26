@@ -1,4 +1,7 @@
 #pragma once
+
+#include "LiveData.h"
+#include "pitchlane/TempoMap.h"
 // Pure UI logic (no painting) so it can be unit-tested headlessly: mouse-gesture mapping for
 // the piano roll, bar/beat maths for the ruler, visible pitch window, label formatting.
 
@@ -45,16 +48,20 @@ struct CreatedSpan { double start, length; };
 CreatedSpan createdSpan(double downTime, double dragTime, double minLength = 0.05) noexcept;
 
 // ---- ruler / grid ----------------------------------------------------------------------
-struct BarGrid
+/** Keeps the editor's tempo map in step with the transport: follows the host's tempo map
+    (learned from ppq / bar-start observations) while Logic supplies a musical position, and
+    otherwise shows a constant grid at the current (manual) tempo and time signature. */
+class TempoFollower
 {
-    double bpm = 120.0;
-    int num = 4, den = 4;
+public:
+    /** Returns true when the map changed (repaint the grid). */
+    bool update(const TransportSnapshot& s);
+    const TempoMap& map() const noexcept { return map_; }
+    bool followingHost() const noexcept { return following_; }
 
-    double secondsPerBeat() const noexcept { return 60.0 / (bpm > 1.0 ? bpm : 120.0) * 4.0 / (den > 0 ? den : 4); }
-    double secondsPerBar() const noexcept { return secondsPerBeat() * (num > 0 ? num : 4); }
-    /** 1-based bar number containing time t (bar 1 starts at 0 s). */
-    int barAt(double t) const noexcept;
-    double barStart(int bar) const noexcept { return (bar - 1) * secondsPerBar(); }
+private:
+    TempoMap map_;
+    bool following_ = false;
 };
 
 // ---- vertical window -------------------------------------------------------------------

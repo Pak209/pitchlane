@@ -84,6 +84,7 @@ private:
     std::atomic<float>* gateParam_ = nullptr;
     std::atomic<float>* clarityParam_ = nullptr;
     std::atomic<float>* tempoParam_ = nullptr;
+    std::atomic<float>* timeSigParam_ = nullptr;
     std::atomic<float>* noteNamesParam_ = nullptr;
     std::atomic<float>* smoothingParam_ = nullptr;
     std::atomic<float>* hostSyncParam_ = nullptr;

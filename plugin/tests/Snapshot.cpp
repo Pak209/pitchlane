@@ -81,8 +81,8 @@ int main(int argc, char** argv)
     const int height = argc > 3 ? std::atoi(argv[3]) : PitchLaneEditor::kDefaultH;
 
     PitchLaneProcessor proc;
-    const ui::BarGrid grid { kBpm, 4, 4 };
-    auto bar = [&grid](double b) { return grid.barStart(1) + (b - 1.0) * grid.secondsPerBar(); }; // fractional bar -> s
+    const double secondsPerBar = 4 * 60.0 / kBpm;
+    auto bar = [secondsPerBar](double b) { return (b - 1.0) * secondsPerBar; }; // fractional bar -> s
 
     // ---- settings (A minor, 104 BPM, C3-C5, +42 ms offset, ±15 cents) -------------------------
     setParam(proc, params::key, 9.f);

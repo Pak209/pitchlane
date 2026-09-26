@@ -18,6 +18,7 @@ PitchLaneProcessor::PitchLaneProcessor()
     noteNamesParam_ = apvts_.getRawParameterValue(params::noteNames);
     smoothingParam_ = apvts_.getRawParameterValue(params::smoothing);
     hostSyncParam_ = apvts_.getRawParameterValue(params::hostSync);
+    timeSigParam_ = apvts_.getRawParameterValue(params::timeSig);
 
     analysis_.onFinished = [this](const AnalysisManager::Result& r) {
         if (r.status == AnalysisManager::Status::Finished)
@@ -88,6 +89,7 @@ HostPosition PitchLaneProcessor::readHost(juce::AudioPlayHead* ph, int& timeSigN
     h.valid = true;
     if (auto t = pos->getTimeInSeconds()) { h.hasTimeSeconds = true; h.timeSeconds = *t; }
     if (auto p = pos->getPpqPosition()) { h.hasPpq = true; h.ppq = *p; }
+    if (auto b = pos->getPpqPositionOfLastBarStart()) { h.hasBarStart = true; h.barStartPpq = *b; }
     if (auto b = pos->getBpm()) { h.hasBpm = *b > 0.0; h.bpm = *b; }
     h.isPlaying = pos->getIsPlaying();
     h.isRecording = pos->getIsRecording();
@@ -141,8 +143,15 @@ void PitchLaneProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mi
     snap.loopStart = st.loopStart;
     snap.loopEnd = st.loopEnd;
     snap.source = static_cast<int32_t>(st.source);
-    snap.timeSigNum = sync ? timeSigNum_ : 4;
-    snap.timeSigDen = sync ? timeSigDen_ : 4;
+    const bool hostTimeline = sync && st.source != TimeSource::FreeRunning;
+    const auto manualSig = params::timeSigFromIndex(juce::roundToInt(timeSigParam_->load()));
+    snap.timeSigNum = hostTimeline ? timeSigNum_ : manualSig.num;
+    snap.timeSigDen = hostTimeline ? timeSigDen_ : manualSig.den;
+    // The host's musical position at songTime (feeds the editor's tempo map).
+    snap.hasPpq = hostTimeline && host.hasPpq ? 1 : 0;
+    snap.ppq = host.ppq;
+    snap.hasBarStart = hostTimeline && host.hasBarStart ? 1 : 0;
+    snap.barStartPpq = host.barStartPpq;
     snap.playing = st.playing;
     snap.recording = st.recording;
     snap.looping = st.looping;

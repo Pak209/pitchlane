@@ -11,6 +11,7 @@
 #include "UiModel.h"
 #include "pitchlane/NoteMath.h"
 #include "pitchlane/ReferenceNotes.h"
+#include "pitchlane/TempoMap.h"
 
 namespace pitchlane {
 
@@ -87,7 +88,7 @@ private:
         OctaveConvention conv = OctaveConvention::Scientific;
         bool scalesGuide = false;
         bool showNotes = true, showTrace = true;
-        ui::BarGrid grid;
+        const TempoMap* tempo = nullptr;   // bars/beats (host tempo map or manual tempo)
         juce::Rectangle<float> area;   // note area (right of the keyboard, below ruler + lane)
         juce::Rectangle<float> ruler, lane, keys;
         float rowH() const { return area.getHeight() / static_cast<float>(hi - lo + 1); }
@@ -113,6 +114,7 @@ private:
     LiveFrame latest_;
     double latestWallMs_ = 0.0;
     TransportSnapshot snap_;
+    ui::TempoFollower tempo_;
     bool wasPlaying_ = false;
     bool follow_ = true;
     double viewStart_ = 0.0;

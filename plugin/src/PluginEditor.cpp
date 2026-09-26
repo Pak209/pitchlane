@@ -107,8 +107,25 @@ PitchLaneEditor::PitchLaneEditor(PitchLaneProcessor& p)
         }
         m.addSectionHeader("Manual tempo (drag, scroll or double-click to type)");
         for (int b : { 60, 70, 80, 90, 100, 104, 110, 120, 128, 140, 160 }) m.addItem(1000 + b, String(b) + " BPM");
+        PopupMenu sig;
+        const int cur = roundToInt(param(params::timeSig)->convertFrom0to1(param(params::timeSig)->getValue()));
+        for (int i = 0; i < params::numTimeSigChoices; ++i)
+        {
+            const auto ts = params::timeSigChoices[i];
+            sig.addItem(100 + i, String(ts.num) + "/" + String(ts.den), true, i == cur);
+        }
+        m.addSubMenu("Time signature", sig);
     };
-    bpmField_.menuResult = [this](int r) { if (r > 1000) bpmField_.setValue(static_cast<float>(r - 1000)); };
+    bpmField_.menuResult = [this](int r) {
+        if (r > 1000) bpmField_.setValue(static_cast<float>(r - 1000));
+        else if (r >= 100 && r < 100 + params::numTimeSigChoices)
+        {
+            auto* ts = param(params::timeSig);
+            ts->beginChangeGesture();
+            ts->setValueNotifyingHost(ts->convertTo0to1(static_cast<float>(r - 100)));
+            ts->endChangeGesture();
+        }
+    };
 
     addAndMakeVisible(syncBtn_);
     syncBtn_.setTooltip("Logic Sync: follow Logic's transport and tempo. Off = free-running clock at the manual BPM.");

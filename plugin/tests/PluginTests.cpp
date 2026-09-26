@@ -27,8 +27,15 @@ struct FakePlayHead : juce::AudioPlayHead
         if (!valid) return {};
         PositionInfo p;
         p.setTimeInSeconds(time);
-        p.setPpqPosition(time * bpm / 60.0);
+        const double ppq = ppqAtChange + (time - changeTime) * bpm / 60.0;
+        p.setPpqPosition(ppq);
         p.setBpm(bpm);
+        if (num > 0)
+        {
+            p.setTimeSignature(TimeSignature { num, den });
+            const double barLen = num * 4.0 / den;
+            p.setPpqPositionOfLastBarStart(barAnchor + std::floor((ppq - barAnchor) / barLen + 1e-9) * barLen);
+        }
         p.setIsPlaying(playing);
         p.setIsRecording(recording);
         p.setIsLooping(looping);
@@ -37,6 +44,15 @@ struct FakePlayHead : juce::AudioPlayHead
     }
     bool valid = true, playing = true, recording = false, looping = false;
     double time = 0.0, bpm = 120.0;
+    double changeTime = 0.0, ppqAtChange = 0.0;   // last tempo change (ppq stays continuous)
+    int num = 0, den = 4;                         // 0 = no time signature / bar info
+    double barAnchor = 0.0;                       // a bar line (ppq) of the current signature
+    void setTempo(double newBpm)
+    {
+        ppqAtChange += (time - changeTime) * bpm / 60.0;
+        changeTime = time;
+        bpm = newBpm;
+    }
 };
 
 void fillRandom(juce::AudioBuffer<float>& b, uint32_t seed)
@@ -377,14 +393,20 @@ TEST_CASE("UI: roll gesture mapping matches the hint bar")
 
 TEST_CASE("UI: bar ruler maths, pitch window, labels")
 {
-    ui::BarGrid g { 104.0, 4, 4 };
-    CHECK_NEAR(g.secondsPerBeat(), 60.0 / 104.0, 1e-12);
-    CHECK_NEAR(g.secondsPerBar(), 4 * 60.0 / 104.0, 1e-12);
-    CHECK_EQ(g.barAt(0.0), 1);
-    CHECK_EQ(g.barAt(g.barStart(15)), 15);
-    CHECK_EQ(g.barAt(g.barStart(15) - 1e-6), 14);
-    ui::BarGrid g68 { 120.0, 6, 8 };
-    CHECK_NEAR(g68.secondsPerBar(), 6 * 0.25, 1e-12);   // six eighth notes at 120 bpm
+    ui::TempoFollower f;
+    TransportSnapshot s;
+    s.bpm = 104.0;
+    CHECK(f.update(s));
+    CHECK(!f.update(s));                                   // unchanged -> no repaint
+    const auto& g = f.map();
+    CHECK_NEAR(g.secondsPerBeatAt(0.0), 60.0 / 104.0, 1e-12);
+    CHECK_NEAR(g.timeOfBar(2), 4 * 60.0 / 104.0, 1e-12);
+    CHECK_EQ(g.barBeatAt(0.0).bar, 1);
+    CHECK_EQ(g.barBeatAt(g.timeOfBar(15)).bar, 15);
+    CHECK_EQ(g.barBeatAt(g.timeOfBar(15) - 1e-6).bar, 14);
+    s.bpm = 120.0; s.timeSigNum = 6; s.timeSigDen = 8;
+    CHECK(f.update(s));
+    CHECK_NEAR(f.map().timeOfBar(2), 6 * 0.25, 1e-12);   // six eighth notes at 120 bpm
 
     // Whole range fits -> shown entirely.
     auto w = ui::fitPitchWindow(48, 72, 500.f, 15.f, 60.0);
@@ -578,4 +600,69 @@ int main()
 {
     juce::ScopedJuceInitialiser_GUI init;
     return tf::runAll("PitchLaneTests");
+}
+
+TEST_CASE("Plugin: host tempo map (tempo + signature changes) and manual time signature")
+{
+    PitchLaneProcessor proc;
+    FakePlayHead ph;
+    ph.bpm = 90.0; ph.num = 3; ph.den = 4;
+    proc.setPlayHead(&ph);
+    proc.prepareToPlay(48000.0, 480);
+    juce::MidiBuffer midi;
+    ui::TempoFollower follower;
+    auto run = [&](double seconds) {
+        const int blocks = static_cast<int>(std::lround(seconds * 100.0));
+        for (int i = 0; i < blocks; ++i)
+        {
+            juce::AudioBuffer<float> buf(2, 480);
+            buf.clear();
+            proc.processBlock(buf, midi);
+            ph.time += 0.01;
+            follower.update(proc.getTransport());
+        }
+    };
+    run(1.0);
+    auto t = proc.getTransport();
+    CHECK(t.hasPpq);
+    CHECK(t.hasBarStart);
+    CHECK_EQ(t.timeSigNum, 3);
+    CHECK_EQ(t.timeSigDen, 4);
+    CHECK(follower.followingHost());
+    // 3/4 at 90 bpm: 2 s per bar.
+    CHECK_NEAR(follower.map().timeOfBar(3), 4.0, 1e-6);
+    // Tempo change to 120 at bar 3 (4.0 s): bars 3.. are 1.5 s long.
+    run(3.0);
+    ph.setTempo(120.0);
+    run(3.0);
+    CHECK_NEAR(follower.map().timeOfBar(2), 2.0, 1e-3);
+    CHECK_NEAR(follower.map().timeOfBar(4), 4.0 + 1.5, 1e-3);
+    CHECK_EQ(follower.map().barBeatAt(4.0 + 1.5 + 0.55).beat, 2);
+    // Signature change to 7/8 at bar 5 (5.5 + 1.5 = 7.0 s).
+    run(0.0);
+    const double ppqNow = ph.ppqAtChange + (ph.time - ph.changeTime) * ph.bpm / 60.0;
+    CHECK_NEAR(ppqNow, 6.0 + 6.0, 1e-6);                   // 6 quarters @90 + 6 @120 = bar 5
+    ph.num = 7; ph.den = 8; ph.barAnchor = ppqNow;
+    run(2.0);
+    CHECK_EQ(proc.getTransport().timeSigNum, 7);
+    CHECK_NEAR(follower.map().timeOfBar(5), 7.0, 1e-3);
+    CHECK_NEAR(follower.map().timeOfBar(6), 7.0 + 1.75, 1e-3);   // 7 eighths at 120 bpm
+    CHECK_NEAR(follower.map().timeOfBar(4), 5.5, 1e-3);          // earlier bars kept
+    CHECK_NEAR(follower.map().secondsPerBeatAt(8.0), 0.25, 1e-9);
+
+    // Logic Sync off: manual tempo + manual time signature (6/8), constant grid.
+    proc.getApvts().getParameter(params::hostSync)->setValueNotifyingHost(0.f);
+    auto* sig = proc.getApvts().getParameter(params::timeSig);
+    sig->setValueNotifyingHost(sig->convertTo0to1(4.f));   // 6/8
+    auto* tempo = proc.getApvts().getParameter(params::tempo);
+    tempo->setValueNotifyingHost(tempo->convertTo0to1(80.f));
+    run(0.5);
+    t = proc.getTransport();
+    CHECK(!t.hasPpq);
+    CHECK_EQ(t.timeSigNum, 6);
+    CHECK_EQ(t.timeSigDen, 8);
+    CHECK(!follower.followingHost());
+    CHECK_EQ(follower.map().segments().size(), size_t(1));
+    CHECK_NEAR(follower.map().timeOfBar(2), 6 * 0.375, 1e-6);   // 6 eighths at 80 bpm = 2.25 s
+    proc.setPlayHead(nullptr);
 }

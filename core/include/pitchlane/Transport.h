@@ -19,6 +19,8 @@ struct HostPosition
     bool isLooping = false;
     bool hasLoop = false;
     double loopStartPpq = 0.0, loopEndPpq = 0.0;
+    bool hasBarStart = false;
+    double barStartPpq = 0.0;   // ppq of the last bar line at or before ppq
 };
 
 enum class TimeSource { HostSeconds, HostPpq, FreeRunning };

@@ -31,9 +31,32 @@ CreatedSpan createdSpan(double downTime, double dragTime, double minLength) noex
     return { a, std::max(minLength, b - a) };
 }
 
-int BarGrid::barAt(double t) const noexcept
+bool TempoFollower::update(const TransportSnapshot& s)
 {
-    return static_cast<int>(std::floor(t / secondsPerBar() + 1e-9)) + 1;
+    const double bpm = s.bpm > 1.0 ? s.bpm : 120.0;
+    const int num = s.timeSigNum > 0 ? s.timeSigNum : 4;
+    const int den = s.timeSigDen > 0 ? s.timeSigDen : 4;
+    if (s.hasPpq)
+    {
+        bool changed = false;
+        if (!following_) { following_ = true; map_.setConstant(bpm, num, den); changed = true; }
+        TempoObservation o;
+        o.time = s.songTime;
+        o.ppq = s.ppq;
+        o.hasPpq = true;
+        o.bpm = bpm;
+        o.num = num;
+        o.den = den;
+        o.barStartPpq = s.barStartPpq;
+        o.hasBarStart = s.hasBarStart != 0;
+        return map_.observe(o) || changed;
+    }
+    const auto& seg = map_.segments();
+    if (!following_ && seg.size() == 1 && std::abs(seg[0].bpm - bpm) < 1e-6 && seg[0].num == num && seg[0].den == den)
+        return false;
+    following_ = false;
+    map_.setConstant(bpm, num, den);
+    return true;
 }
 
 PitchWindow fitPitchWindow(int rangeLo, int rangeHi, float heightPx, float minRowPx, double centre, int wantedRows) noexcept

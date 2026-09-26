@@ -74,6 +74,12 @@ AudioProcessorValueTreeState::ParameterLayout createLayout(std::function<int()> 
     layout.add(std::make_unique<AudioParameterChoice>(ParameterID { display, v2 }, "Display",
                                                       StringArray { "Both", "Vocal", "Reference" }, 0));
     layout.add(std::make_unique<AudioParameterBool>(ParameterID { hostSync, v2 }, "Logic Sync", true));
+
+    const int v3 = 3;
+    StringArray sigs;
+    for (const auto& s : timeSigChoices) sigs.add(String(s.num) + "/" + String(s.den));
+    layout.add(std::make_unique<AudioParameterChoice>(ParameterID { timeSig, v3 }, "Manual time signature", sigs,
+                                                      defaultTimeSigIndex));
     return layout;
 }
 
