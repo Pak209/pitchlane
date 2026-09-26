@@ -572,7 +572,15 @@ int markHarmonySuspects(NoteList& notes, const std::vector<AnalysisFrame>& frame
             double acc = 0.0, med = ctx.back().first;
             for (const auto& c : ctx) { acc += c.second; if (acc >= 0.5 * total) { med = c.first; break; } }
             localMedian[i] = med;
-            if (n.length < 0.5 && (n.pitch <= med - s.outlierBelow || n.pitch >= med + s.outlierAbove)) outlier[i] = 1;
+            if (n.length < 0.5 && (n.pitch <= med - s.outlierBelow || n.pitch >= med + s.outlierAbove))
+            {
+                // ...but not when it is part of a melodic line: a neighbour within 1 s that is
+                // less than 5 semitones away (e.g. the low start of a rising scale) clears it.
+                bool connected = false;
+                if (i > 0 && n.start - notes[i - 1].end() <= 1.0 && std::abs(notes[i - 1].pitch - n.pitch) < 5) connected = true;
+                if (i + 1 < notes.size() && notes[i + 1].start - n.end() <= 1.0 && std::abs(notes[i + 1].pitch - n.pitch) < 5) connected = true;
+                if (!connected) outlier[i] = 1;
+            }
         }
     }
     // Nearest neighbours that are not range outliers.

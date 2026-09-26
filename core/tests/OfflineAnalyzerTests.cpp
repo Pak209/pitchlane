@@ -193,3 +193,19 @@ TEST_CASE("OfflineAnalyzer: long file (6 min) keeps reporting progress and cance
     CHECK(res.notes.empty());
     CHECK(maxGapMs < 400.0);
 }
+
+TEST_CASE("OfflineAnalyzer: a scale spanning more than an octave keeps every note active (no false harmony flags)")
+{
+    // Found with a synthetic 'Dan-like' file: the low start of a rising line (C4 D4 E4 before
+    // G4..G5) was muted as a range outlier. 120 bpm eighth-ish notes from 15 s.
+    const int mel[] = { 60, 62, 64, 67, 69, 72, 74, 76, 79, 76, 74, 72, 69, 67, 64, 62 };
+    std::vector<testsig::MelodyNote> notes;
+    for (int i = 0; i < 16; ++i) notes.push_back({ 15.0 + 0.5 * i, 0.45, mel[i] });
+    const auto audio = testsig::melody(44100.0, 24.0, notes);
+    const auto r = analyzeMonophonic(audio.data(), audio.size(), 44100.0, {});
+    CHECK_EQ(r.notes.size(), size_t(16));
+    int muted = 0;
+    for (const auto& n : r.notes) muted += n.muted() ? 1 : 0;
+    CHECK_EQ(muted, 0);
+    if (!r.notes.empty()) CHECK_NEAR(r.notes.front().start, 15.0, 0.03);
+}
