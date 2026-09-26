@@ -351,9 +351,12 @@ void StatusDot::paint(Graphics& g)
     const auto r = getLocalBounds().toFloat();
     const float d = jmin(r.getWidth(), r.getHeight());
     const auto c = r.getCentre();
-    Colour led = state_ == State::Off ? col::textFaint : state_ == State::Waiting ? col::amber : col::green;
+    const Colour led = state_ == State::Playing ? col::green
+                     : state_ == State::Stopped ? col::amber
+                     : state_ == State::NoInfo  ? col::textDim
+                                                : col::textFaint;
     const float ringD = d * 0.8f, ledD = d * 0.38f;
-    if (state_ == State::Synced || state_ == State::Playing)
+    if (state_ == State::Stopped || state_ == State::Playing)
     {
         const float glow = state_ == State::Playing ? 1.f : 0.6f;
         for (int i = 3; i >= 1; --i)
@@ -368,7 +371,10 @@ void StatusDot::paint(Graphics& g)
     g.setColour(led.withAlpha(0.55f));
     g.drawEllipse(c.x - ringD * 0.5f, c.y - ringD * 0.5f, ringD, ringD, 1.2f);
     g.setColour(led);
-    g.fillEllipse(c.x - ledD * 0.5f, c.y - ledD * 0.5f, ledD, ledD);
+    if (state_ == State::Off)
+        g.drawEllipse(c.x - ledD * 0.5f, c.y - ledD * 0.5f, ledD, ledD, 1.2f);   // hollow: sync off
+    else
+        g.fillEllipse(c.x - ledD * 0.5f, c.y - ledD * 0.5f, ledD, ledD);
 }
 
 // ============================================================================ ReferenceField

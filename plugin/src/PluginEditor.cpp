@@ -1,5 +1,6 @@
 #include "PluginEditor.h"
 
+#include "Log.h"
 #include "Params.h"
 #include "SettingsPanel.h"
 #include "UiModel.h"
@@ -155,6 +156,21 @@ PitchLaneEditor::PitchLaneEditor(PitchLaneProcessor& p)
         b->setWantsKeyboardFocus(false);
     }
 
+    addChildComponent(fitBtn_);
+    fitBtn_.setWantsKeyboardFocus(false);
+    fitBtn_.getProperties().set("accent", true);
+    fitBtn_.setTooltip("Go to notes: scroll and zoom to the first reference note (about 8 bars) and show its pitch range.");
+    fitBtn_.onClick = [this] { goToNotes(false); };
+    addChildComponent(toastActionBtn_);
+    toastActionBtn_.setWantsKeyboardFocus(false);
+    toastActionBtn_.onClick = [this] {
+        auto a = std::move(toastAction_);
+        toastAction_ = nullptr;
+        toastActionBtn_.setVisible(false);
+        if (a) a();
+    };
+    roll_.onGoToNotes = [this] { goToNotes(false); };
+
     setupBottomBar();
 
     setResizable(true, true);
@@ -162,6 +178,14 @@ PitchLaneEditor::PitchLaneEditor(PitchLaneProcessor& p)
     setSize(kDefaultW, kDefaultH);
     updateReferenceField();
     startTimerHz(60);
+    lastAnalysisSerial_ = proc_.getLastAnalysis().serial;
+    {
+        const auto t = proc_.getTransport();
+        log::write("editor", "opened: Pitch Lane " + log::versionString() + ", host " + PluginHostType().getHostDescription()
+                                 + ", " + SystemStats::getOperatingSystemName() + ", " + String(proc_.getReference().getNotes().size())
+                                 + " notes, sync " + (proc_.getApvts().getRawParameterValue(params::hostSync)->load() >= 0.5f ? "on" : "off")
+                                 + ", audio blocks so far " + String(t.blockCounter));
+    }
 }
 
 PitchLaneEditor::~PitchLaneEditor()
@@ -301,6 +325,10 @@ void PitchLaneEditor::resized()
         right.removeFromRight(118); // "Zoom: ⌘ + scroll" text
         scrollRight_.setBounds(right.removeFromRight(26).withSizeKeepingCentre(26, 24));
         scrollLeft_.setBounds(right.removeFromRight(26).withSizeKeepingCentre(26, 24));
+        hb.removeFromRight(10);
+        fitBtn_.setBounds(hb.removeFromRight(104).withSizeKeepingCentre(104, 24));
+        hb.removeFromRight(8);
+        toastActionBtn_.setBounds(hb.removeFromRight(200).withSizeKeepingCentre(200, 24));
         auto sel = hb.withTrimmedLeft(110);
         for (auto* btn : { &selDown_, &selUp_, &selEarlier_, &selLater_, &selDelete_ })
         {
@@ -377,11 +405,11 @@ void PitchLaneEditor::paint(Graphics& g)
     if (analysing_)
     {
         auto pb = analyzeBtn_.getBounds().toFloat().reduced(8.f, 0.f);
-        pb = pb.withY(pb.getBottom() + 4.f).withHeight(3.f);
+        pb = pb.withY(pb.getBottom() + 4.f).withHeight(5.f);
         g.setColour(col::field);
-        g.fillRoundedRectangle(pb, 1.5f);
+        g.fillRoundedRectangle(pb, 2.5f);
         g.setColour(col::lavender);
-        g.fillRoundedRectangle(pb.withWidth(pb.getWidth() * static_cast<float>(jlimit(0.0, 1.0, progress_))), 1.5f);
+        g.fillRoundedRectangle(pb.withWidth(jmax(5.f, pb.getWidth() * static_cast<float>(jlimit(0.0, 1.0, progress_)))), 2.5f);
     }
 
     // hint bar
@@ -398,11 +426,16 @@ void PitchLaneEditor::paint(Graphics& g)
         right.removeFromRight(58);
         g.drawText("Scroll:", right, Justification::centredRight, false);
         hb.removeFromRight(10);
+        if (fitBtn_.isVisible()) hb.setRight(fitBtn_.getX() - 10);
+        if (toastActionBtn_.isVisible()) hb.setRight(toastActionBtn_.getX() - 10);
         const int nSel = proc_.getReference().numSelected();
-        if (Time::getMillisecondCounterHiRes() < toastUntilMs_ && toast_.isNotEmpty())
+        if (toastVisible())
         {
-            g.setColour(col::lavenderHi);
-            g.drawText(toast_, hb, Justification::centredLeft, true);
+            const auto c = toastKind_ == ToastKind::Error ? col::off : toastKind_ == ToastKind::Success ? col::green : col::lavenderHi;
+            g.setColour(c);
+            g.fillEllipse(static_cast<float>(hb.getX()), hb.getCentreY() - 3.5f, 7.f, 7.f);
+            g.setFont(theme::font(12.5f, toastKind_ == ToastKind::Info ? theme::Weight::Regular : theme::Weight::Medium));
+            g.drawText(toast_, hb.withTrimmedLeft(14), Justification::centredLeft, true);
         }
         else if (nSel > 0)
         {
@@ -456,11 +489,34 @@ bool PitchLaneEditor::keyPressed(const KeyPress& key)
     return roll_.handleKey(key);
 }
 
-void PitchLaneEditor::showToast(const String& message)
+void PitchLaneEditor::showToast(const String& message, ToastKind kind, double seconds, const String& actionText,
+                                std::function<void()> action)
 {
     toast_ = message;
-    toastUntilMs_ = Time::getMillisecondCounterHiRes() + 6000.0;
+    toastKind_ = kind;
+    toastUntilMs_ = seconds > 0.0 ? Time::getMillisecondCounterHiRes() + seconds * 1000.0 : -1.0;
+    toastAction_ = std::move(action);
+    toastActionBtn_.setButtonText(actionText);
+    toastActionBtn_.setVisible(toastAction_ != nullptr && actionText.isNotEmpty());
+    for (auto* b : { &selDown_, &selUp_, &selEarlier_, &selLater_, &selDelete_ }) b->setVisible(false);
     repaint(hintArea_);
+}
+
+bool PitchLaneEditor::toastVisible() const
+{
+    return toast_.isNotEmpty() && (toastUntilMs_ < 0.0 || Time::getMillisecondCounterHiRes() < toastUntilMs_);
+}
+
+void PitchLaneEditor::mouseDown(const MouseEvent& e)
+{
+    // Click the hint bar to dismiss a sticky message.
+    if (hintArea_.contains(e.getPosition()) && toastVisible() && toastUntilMs_ < 0.0)
+    {
+        toast_.clear();
+        toastAction_ = nullptr;
+        toastActionBtn_.setVisible(false);
+        repaint(hintArea_);
+    }
 }
 
 // ---- timer ---------------------------------------------------------------------------------------
@@ -482,28 +538,42 @@ void PitchLaneEditor::timerCallback()
         repaint(analyzeBtn_.getBounds().expanded(0, 10));
     }
 
+    fitBtn_.setVisible(!running && proc_.getReference().size() > 0);
+    if (proc_.getLastAnalysis().serial != lastAnalysisSerial_)
+    {
+        lastAnalysisSerial_ = proc_.getLastAnalysis().serial;
+        handleAnalysisOutcome(proc_.getLastAnalysis());
+    }
+    if (!openFitChecked_ && tick_ >= 2)
+    {
+        // Reopened with notes but parked somewhere without any (e.g. at bar 1 before a late
+        // vocal entry): jump to them once.
+        openFitChecked_ = true;
+        if (!running && !proc_.getReference().getNotes().empty() && !roll_.getSnapshot().playing && roll_.numNotesInView() == 0)
+            goToNotes(false);
+    }
+
     if (++tick_ % 6 == 0)
     {
         const auto t = proc_.getTransport();
         const bool sync = ap.getRawParameterValue(params::hostSync)->load() >= 0.5f;
         const bool host = t.source != static_cast<int>(TimeSource::FreeRunning);
-        if (!sync) statusDot_.setState(StatusDot::State::Off, "Logic Sync off: free-running clock at the manual BPM");
-        else if (!host) statusDot_.setState(StatusDot::State::Waiting, "Logic Sync on, but the host provides no timeline");
-        else if (t.playing) statusDot_.setState(StatusDot::State::Playing, "Synced to the host transport (playing)");
-        else statusDot_.setState(StatusDot::State::Synced, "Synced to the host transport (stopped)");
-        bpmField_.readOnly = sync && host;
+        const bool fresh = t.blockCounter > 0 && Time::getMillisecondCounterHiRes() - t.wallMs < 1000.0;
+        const auto link = ui::hostLinkState(sync, fresh, host, t.playing != 0);
+        const auto dot = link == ui::HostLink::Playing ? StatusDot::State::Playing
+                       : link == ui::HostLink::Stopped ? StatusDot::State::Stopped
+                       : link == ui::HostLink::SyncOff ? StatusDot::State::Off
+                                                       : StatusDot::State::NoInfo;
+        statusDot_.setState(dot, ui::hostLinkTooltip(link));
+        bpmField_.readOnly = sync && host && fresh;
         bpmField_.setTooltip(bpmField_.readOnly ? "Following Logic's tempo (Logic Sync on)."
-                                                : "Manual tempo, used when Logic Sync is off or the host has no tempo.");
+                             : sync ? "Logic's tempo appears here once Logic sends audio (press play). Until then the manual tempo is used."
+                                    : "Manual tempo, used when Logic Sync is off or the host has no tempo.");
         for (auto* f : { &keyField_, &bpmField_, &offsetField_, &transposeField_, &rangeField_, &toleranceField_ }) f->refresh();
 
-        const String status = an.getStatusText();
-        if (status != lastAnalysisStatus_)
-        {
-            lastAnalysisStatus_ = status;
-            if (status.isNotEmpty()) showToast(status);
-        }
+        const bool toastOn = toastVisible();
+        if (!toastOn && toastActionBtn_.isVisible()) { toastActionBtn_.setVisible(false); toastAction_ = nullptr; }
         const bool anySel = proc_.getReference().numSelected() > 0;
-        const bool toastOn = Time::getMillisecondCounterHiRes() < toastUntilMs_;
         for (auto* b : { &selDown_, &selUp_, &selEarlier_, &selLater_, &selDelete_ }) b->setVisible(anySel && !toastOn);
         repaint(hintArea_);
     }
@@ -526,10 +596,17 @@ void PitchLaneEditor::updateReferenceField()
         return;
     }
     const File f(path);
+    const auto notes = proc_.getReference().getNotes();
+    const int total = static_cast<int>(notes.size());
+    int muted = 0;
+    for (const auto& n : notes) muted += n.muted() ? 1 : 0;
+    const auto& last = proc_.getLastAnalysis();
+    String count = String::fromUTF8("  \xc2\xb7  ") + String(total) + (total == 1 ? " note" : " notes");
+    if (muted > 0) count << " (" << muted << " muted)";
     if (f.existsAsFile())
     {
-        refField_.setFile(f.getFileName(), col::text);
-        refField_.setTooltip(path);
+        refField_.setFile(f.getFileName() + count, col::text);
+        refField_.setTooltip(path + (last.serial > 0 && last.file == f ? "\n" + last.message : String()));
     }
     else
     {
@@ -586,17 +663,40 @@ void PitchLaneEditor::filesDropped(const StringArray& files, int, int)
 
 void PitchLaneEditor::setPendingVocal(const File& f)
 {
+    loadVocalFile(f);
+}
+
+bool PitchLaneEditor::loadVocalFile(const File& f)
+{
+    log::write("load", "vocal chosen: \"" + f.getFullPathName() + "\" (" + String(f.getSize() / 1024) + " KB, "
+                           + (f.existsAsFile() ? "exists" : "MISSING") + ", readable " + (f.hasReadAccess() ? "yes" : "no") + ")");
+    String why;
+    if (!f.existsAsFile()) why = "File not found: " + f.getFullPathName();
+    else if (!f.hasReadAccess()) why = "No permission to read " + f.getFileName();
+    else if (!proc_.getAnalysis().canOpen(f))
+        why = "Unsupported file type \"" + f.getFileExtension() + "\". Supported: "
+            + supportedFormatsText(proc_.getAnalysis().getFormats()) + ".";
+    if (why.isNotEmpty())
+    {
+        log::write("load", "rejected: " + why);
+        showToast(why, ToastKind::Error, 0.0);
+        return false;
+    }
     pendingVocal_ = f;
+    roll_.setNotice({});
     updateReferenceField();
     showToast("Ready: click ANALYZE VOCAL to turn " + f.getFileName() + " into reference notes");
+    return true;
 }
 
 void PitchLaneEditor::chooseVocalFile()
 {
     chooser_ = std::make_unique<FileChooser>("Choose an isolated lead-vocal file", File(), proc_.getAnalysis().getWildcard());
-    chooser_->launchAsync(FileBrowserComponent::openMode | FileBrowserComponent::canSelectFiles, [this](const FileChooser& fc) {
+    SafePointer<PitchLaneEditor> safe(this);
+    chooser_->launchAsync(FileBrowserComponent::openMode | FileBrowserComponent::canSelectFiles, [safe](const FileChooser& fc) {
+        if (safe == nullptr) return;
         const auto f = fc.getResult();
-        if (f.existsAsFile()) setPendingVocal(f);
+        if (f != File()) safe->loadVocalFile(f);   // (cancel returns an empty File)
     });
 }
 
@@ -608,13 +708,129 @@ void PitchLaneEditor::startAnalysis()
         const File src(proc_.getReference().getSourcePath());
         if (src.existsAsFile() && proc_.getAnalysis().canOpen(src)) f = src;
     }
-    if (f == File() || !f.existsAsFile())
+    if (f == File())
     {
         chooseVocalFile();
         return;
     }
-    if (proc_.getAnalysis().start(f)) pendingVocal_ = File();
+    if (!f.existsAsFile())
+    {
+        log::write("analysis", "not started, file missing: " + f.getFullPathName());
+        showToast("File not found: " + f.getFullPathName() + ". Choose the vocal again.", ToastKind::Error, 0.0);
+        chooseVocalFile();
+        return;
+    }
+    if (proc_.getAnalysis().start(f))
+    {
+        pendingVocal_ = File();
+        roll_.setNotice({});
+        showToast("Analyzing " + f.getFileName() + String::fromUTF8("\xe2\x80\xa6 (click CANCEL to stop)"), ToastKind::Info, 0.0);
+    }
     else showToast("An analysis is already running");
+    updateReferenceField();
+}
+
+void PitchLaneEditor::setRange(int lo, int hi)
+{
+    auto set = [](RangedAudioParameter* prm, int v) {
+        prm->beginChangeGesture();
+        prm->setValueNotifyingHost(prm->convertTo0to1(static_cast<float>(v)));
+        prm->endChangeGesture();
+    };
+    set(param(params::lowNote), lo);
+    set(param(params::highNote), hi);
+    rangeField_.refresh();
+}
+
+PianoRoll::FitResult PitchLaneEditor::goToNotes(bool afterAnalysis)
+{
+    auto& ap = proc_.getApvts();
+    const auto notes = proc_.getReference().getNotes();
+    const int transpose = roundToInt(ap.getRawParameterValue(params::transpose)->load());
+    const int curLo = roundToInt(ap.getRawParameterValue(params::lowNote)->load());
+    const int curHi = roundToInt(ap.getRawParameterValue(params::highNote)->load());
+    int nLo = 0, nHi = -1;
+    ui::RangeFit plan;
+    if (PianoRoll::activePitchRange(notes, transpose, nLo, nHi))
+        plan = ui::planVocalRange(curLo, curHi, nLo, nHi, curLo == ui::kDefaultRangeLo && curHi == ui::kDefaultRangeHi);
+    const auto conv = convOf(ap);
+    String rangeMsg, offerText;
+    std::function<void()> offer;
+    if (plan.needed && plan.automatic)
+    {
+        setRange(plan.lo, plan.hi);
+        rangeMsg = "vocal range set to " + ui::rangeText(plan.lo, plan.hi, conv) + " to fit the notes";
+    }
+    else if (plan.needed)
+    {
+        offerText = "Expand range to " + ui::rangeText(plan.lo, plan.hi, conv);
+        SafePointer<PitchLaneEditor> safe(this);
+        const int lo = plan.lo, hi = plan.hi;
+        offer = [safe, lo, hi] {
+            if (safe == nullptr) return;
+            safe->setRange(lo, hi);
+            safe->roll_.fitToNotes();
+            log::write("view", "vocal range expanded to " + String(lo) + ".." + String(hi));
+        };
+        rangeMsg = "some notes (" + ui::rangeText(nLo, nHi, conv) + ") are outside your vocal range";
+    }
+    const auto fit = roll_.fitToNotes();
+    const auto vis = roll_.visiblePitchRange();
+    log::write("view", String(afterAnalysis ? "auto-fit" : "go to notes") + ": first active note at "
+                           + String(fit.firstNoteTime, 2) + " s (bar " + String(fit.bar) + "), view " + String(fit.start, 2)
+                           + " s + " + String(fit.span, 2) + " s, pitch rows " + String(vis.first) + ".." + String(vis.second)
+                           + ", notes " + String(nLo) + ".." + String(nHi) + ", range " + String(curLo) + ".." + String(curHi)
+                           + (plan.needed ? (plan.automatic ? " -> auto " : " -> offered ") + String(plan.lo) + ".." + String(plan.hi) : String())
+                           + ", " + String(fit.notesInView) + " notes in view, ref offset "
+                           + String(roundToInt(ap.getRawParameterValue(params::refOffset)->load())) + " ms");
+    if (!afterAnalysis && fit.ok)
+    {
+        String msg = "Showing bar " + String(fit.bar) + " (first note at " + String(fit.firstNoteTime, 1) + " s)";
+        if (rangeMsg.isNotEmpty()) msg << String::fromUTF8(" \xc2\xb7 ") << rangeMsg;
+        showToast(msg, ToastKind::Info, offer ? 15.0 : 5.0, offerText, offer);
+    }
+    else if (afterAnalysis && rangeMsg.isNotEmpty())
+    {
+        // handleAnalysisOutcome composes the final message; stash the range part in the toast.
+        toast_ = rangeMsg;
+        toastAction_ = offer;
+        toastActionBtn_.setButtonText(offerText);
+    }
+    return fit;
+}
+
+void PitchLaneEditor::handleAnalysisOutcome(const PitchLaneProcessor::AnalysisOutcome& o)
+{
+    using S = AnalysisManager::Status;
+    const auto t = proc_.getTransport();
+    log::write("analysis", "UI got result #" + String(o.serial) + ": " + o.message + " | transport: "
+                               + (t.blockCounter == 0 ? String("no audio blocks yet") : String(t.playing ? "playing" : "stopped"))
+                               + " at " + String(t.songTime, 2) + " s, " + String(t.bpm, 1) + " bpm, source "
+                               + String(t.source) + ", sync "
+                               + (proc_.getApvts().getRawParameterValue(params::hostSync)->load() >= 0.5f ? "on" : "off"));
+    if (o.status == S::Finished)
+    {
+        toast_.clear();
+        toastAction_ = nullptr;
+        const auto fit = goToNotes(true);
+        const String rangePart = toast_;
+        const auto offer = toastAction_;
+        const auto offerText = toastActionBtn_.getButtonText();
+        String msg = o.message;
+        if (fit.ok) msg << String::fromUTF8(" \xc2\xb7 showing bar ") << fit.bar;
+        if (rangePart.isNotEmpty()) msg << String::fromUTF8(" \xc2\xb7 ") << rangePart;
+        showToast(msg, ToastKind::Success, 30.0, offer ? offerText : String(), offer);
+    }
+    else if (o.status == S::Failed)
+    {
+        roll_.setNotice(o.message);
+        showToast(o.message, ToastKind::Error, 0.0);
+        if (o.file.existsAsFile()) pendingVocal_ = o.file;   // ANALYZE VOCAL retries it
+    }
+    else if (o.status == S::Cancelled)
+    {
+        showToast("Analysis cancelled; the reference notes were not changed", ToastKind::Info, 6.0);
+    }
     updateReferenceField();
 }
 

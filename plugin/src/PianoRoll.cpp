@@ -1,5 +1,6 @@
 #include "PianoRoll.h"
 
+#include "Log.h"
 #include "Params.h"
 #include "PluginProcessor.h"
 #include "Theme.h"
@@ -589,14 +590,7 @@ void PianoRoll::paint(Graphics& g)
         g.setColour(col::lavender.withAlpha(0.7f));
         g.drawRect(rubber_, 1.f);
     }
-    if (notes.empty() && v.showNotes)
-    {
-        g.setColour(col::textDim);
-        g.setFont(theme::font(14.f));
-        g.drawFittedText("No reference notes yet.\nDrop an isolated lead-vocal stem (then Analyze Vocal) or a MIDI file here,\n"
-                         "or use the folder button / settings > Import MIDI.",
-                         v.area.reduced(20.f).toNearestInt(), Justification::centred, 4);
-    }
+    paintOverlays(g, v, notes);
     if (!snap_.playing)
     {
         g.setColour(col::textFaint);
@@ -606,6 +600,188 @@ void PianoRoll::paint(Graphics& g)
     }
     g.setColour(col::divider);
     g.drawHorizontalLine(getHeight() - 1, 0.f, static_cast<float>(getWidth()));
+}
+
+int PianoRoll::countInView(const View& v, const NoteList& notes) const
+{
+    bool anyActive = false;
+    for (const auto& n : notes) anyActive |= !n.muted();
+    int count = 0;
+    for (const auto& n : notes)
+    {
+        if (anyActive && n.muted()) continue;
+        const double s0 = n.start + v.offset, s1 = n.end() + v.offset;
+        const int p = n.pitch + v.transpose;
+        if (s1 > v.start && s0 < v.start + v.span && p >= v.lo && p <= v.hi) ++count;
+    }
+    return count;
+}
+
+int PianoRoll::numNotesInView() const
+{
+    return countInView(makeView(), proc_.getReference().getNotes());
+}
+
+double PianoRoll::getViewSpan() const
+{
+    return makeView().span;
+}
+
+std::pair<int, int> PianoRoll::visiblePitchRange() const
+{
+    const auto v = makeView();
+    return { v.lo, v.hi };
+}
+
+bool PianoRoll::activePitchRange(const NoteList& notes, int transpose, int& lo, int& hi)
+{
+    lo = 1000;
+    hi = -1000;
+    bool anyActive = false;
+    for (const auto& n : notes) anyActive |= !n.muted();
+    for (const auto& n : notes)
+    {
+        if (anyActive && n.muted()) continue;
+        lo = jmin(lo, n.pitch + transpose);
+        hi = jmax(hi, n.pitch + transpose);
+    }
+    return hi >= lo;
+}
+
+PianoRoll::FitResult PianoRoll::fitToNotes()
+{
+    FitResult r;
+    const auto notes = proc_.getReference().getNotes();
+    if (notes.empty()) return r;
+    auto v = makeView();
+    size_t first = 0;
+    while (first < notes.size() && notes[first].muted()) ++first;
+    if (first == notes.size()) first = 0;   // everything muted: show the first note anyway
+    r.firstNoteTime = notes[first].start + v.offset;
+
+    auto* spanParam = proc_.getApvts().getParameter(params::viewSeconds);
+    const auto range = spanParam->getNormalisableRange();
+    const auto fit = ui::planTimeFit(tempo_.map(), r.firstNoteTime, 8, range.start, range.end);
+    spanParam->beginChangeGesture();
+    spanParam->setValueNotifyingHost(spanParam->convertTo0to1(static_cast<float>(fit.span)));
+    spanParam->endChangeGesture();
+    follow_ = false;
+    viewStart_ = fit.start;
+    r.start = fit.start;
+    r.bar = fit.bar;
+    r.span = makeView().span;   // after snapping to the parameter's interval
+
+    // Vertical: centre on the notes in the new window (whole-phrase rows), no easing.
+    activePitchRange(notes, v.transpose, r.pitchLo, r.pitchHi);
+    int pLo = 1000, pHi = -1000;
+    bool anyActive = false;
+    for (const auto& n : notes) anyActive |= !n.muted();
+    for (const auto& n : notes)
+    {
+        if (anyActive && n.muted()) continue;
+        if (n.end() + v.offset <= r.start || n.start + v.offset >= r.start + r.span) continue;
+        pLo = jmin(pLo, n.pitch + v.transpose);
+        pHi = jmax(pHi, n.pitch + v.transpose);
+    }
+    if (pHi >= pLo)
+    {
+        manualPitch_ = false;
+        pitchCentre_ = 0.5 * (pLo + pHi);
+        rowsWanted_ = ui::rowsForPhrase(pLo, pHi);
+    }
+    r.ok = true;
+    r.notesInView = numNotesInView();
+    repaint();
+    return r;
+}
+
+void PianoRoll::paintOverlays(Graphics& g, const View& v, const NoteList& notes)
+{
+    offscreenHint_ = {};
+    auto& an = proc_.getAnalysis();
+    auto card = [&](float w, float h) {
+        auto c = v.area.withSizeKeepingCentre(jmin(w, v.area.getWidth() - 40.f), h);
+        g.setColour(col::panel.withAlpha(0.94f));
+        g.fillRoundedRectangle(c, 10.f);
+        g.setColour(col::lavender.withAlpha(0.55f));
+        g.drawRoundedRectangle(c, 10.f, 1.2f);
+        return c;
+    };
+    if (an.isRunning())
+    {
+        // Big, unmissable progress card (the header button also shows CANCEL + %).
+        auto c = card(520.f, 118.f).reduced(22.f, 16.f);
+        const float p = jlimit(0.f, 1.f, an.getProgress());
+        const bool decoding = an.getStatus() == AnalysisManager::Status::Decoding;
+        g.setColour(col::text);
+        g.setFont(theme::font(15.f, theme::Weight::Medium));
+        g.drawText((decoding ? "Reading " : "Analyzing ") + an.getFile().getFileName() + String::fromUTF8("\xe2\x80\xa6"),
+                   c.removeFromTop(22.f), Justification::centredLeft, true);
+        g.setFont(theme::font(13.f));
+        g.drawText(String(roundToInt(p * 100.f)) + "%", c.removeFromTop(20.f), Justification::centredRight, false);
+        auto bar = c.removeFromTop(8.f);
+        g.setColour(col::field);
+        g.fillRoundedRectangle(bar, 4.f);
+        g.setColour(col::lavender);
+        g.fillRoundedRectangle(bar.withWidth(jmax(8.f, bar.getWidth() * p)), 4.f);
+        c.removeFromTop(10.f);
+        g.setColour(col::textDim);
+        g.setFont(theme::font(12.5f));
+        g.drawText("Runs in the background. Click CANCEL (top right) to stop.", c, Justification::centredLeft, true);
+        return;
+    }
+    noticeRect_ = {};
+    if (notice_.isNotEmpty())
+    {
+        auto c = v.area.withSizeKeepingCentre(jmin(560.f, v.area.getWidth() - 40.f), 124.f);
+        noticeRect_ = c;
+        g.setColour(col::panel.withAlpha(0.96f));
+        g.fillRoundedRectangle(c, 10.f);
+        g.setColour(col::off);
+        g.drawRoundedRectangle(c, 10.f, 1.5f);
+        auto inner = c.reduced(20.f, 14.f);
+        g.setFont(theme::font(14.f, theme::Weight::Medium));
+        g.drawText("Analysis problem", inner.removeFromTop(22.f), Justification::centredLeft, false);
+        g.setColour(col::text);
+        g.setFont(theme::font(13.f));
+        auto foot = inner.removeFromBottom(16.f);
+        g.drawFittedText(notice_, inner.toNearestInt(), Justification::topLeft, 4, 1.f);
+        g.setColour(col::textDim);
+        g.setFont(theme::font(11.5f));
+        g.drawText("Details: " + log::file().getFullPathName() + String::fromUTF8("  \xc2\xb7  click to dismiss"), foot,
+                   Justification::centredLeft, true);
+        return;
+    }
+    if (!v.showNotes) return;
+    if (notes.empty())
+    {
+        g.setColour(col::textDim);
+        g.setFont(theme::font(14.f));
+        g.drawFittedText("No reference notes yet.\nDrop an isolated lead-vocal stem (then Analyze Vocal) or a MIDI file here,\n"
+                         "or use the folder button / settings > Import MIDI.",
+                         v.area.reduced(20.f).toNearestInt(), Justification::centred, 4);
+        return;
+    }
+    if (snap_.playing || countInView(v, notes) > 0) return;
+    // Notes exist but none is visible: say so, and where they are.
+    size_t first = 0;
+    while (first < notes.size() && notes[first].muted()) ++first;
+    if (first == notes.size()) first = 0;
+    const double t = notes[first].start + v.offset;
+    const auto bb = v.tempo->barBeatAt(t);
+    const int mins = static_cast<int>(t / 60.0);
+    const String when = "bar " + String(bb.bar) + ", " + String(mins) + ":" + String(t - mins * 60.0, 1).paddedLeft('0', 4);
+    auto c = card(470.f, 74.f);
+    offscreenHint_ = c;
+    auto inner = c.reduced(18.f, 12.f);
+    g.setColour(col::text);
+    g.setFont(theme::font(14.f, theme::Weight::Medium));
+    g.drawText(String(notes.size()) + " reference notes, none in this view", inner.removeFromTop(24.f),
+               Justification::centred, true);
+    g.setColour(col::lavenderHi);
+    g.setFont(theme::font(13.f));
+    g.drawText("First note at " + when + String::fromUTF8("  \xc2\xb7  click here or \xe2\x80\x9cGo to notes\xe2\x80\x9d"),
+               inner, Justification::centred, true);
 }
 
 void PianoRoll::paintRuler(Graphics& g, const View& v)
@@ -773,6 +949,17 @@ void PianoRoll::paintKeyboard(Graphics& g, const View& v, const Readout& readout
 void PianoRoll::mouseDown(const MouseEvent& e)
 {
     grabKeyboardFocus();
+    if (!noticeRect_.isEmpty() && noticeRect_.contains(e.position))
+    {
+        setNotice({});
+        return;
+    }
+    if (!offscreenHint_.isEmpty() && offscreenHint_.contains(e.position) && e.mods.isLeftButtonDown())
+    {
+        if (onGoToNotes) onGoToNotes();
+        else fitToNotes();
+        return;
+    }
     const auto v = makeView();
     auto& model = proc_.getReference();
     downPos_ = e.position;

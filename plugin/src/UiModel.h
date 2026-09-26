@@ -81,6 +81,28 @@ PitchWindow fitPitchWindow(int rangeLo, int rangeHi, float heightPx, float minRo
 /** Rows wanted to show a phrase spanning [pLo, pHi] comfortably (2-3 rows of margin). */
 inline int rowsForPhrase(int pLo, int pHi) noexcept { return pHi >= pLo ? std::max(13, pHi - pLo + 6) : 0; }
 
+// ---- "Go to notes" / auto-fit after analysis ------------------------------------------------
+/** Time window that shows `bars` bars starting at the bar containing `firstNoteTime` (song
+    seconds, i.e. note start + reference offset). If the note sits right on the bar line, half
+    a beat of lead-in is added. The span is clamped to the View span parameter range. */
+struct TimeFit { double start = 0.0, span = 8.0; int bar = 1; };
+TimeFit planTimeFit(const TempoMap& tempo, double firstNoteTime, int bars = 8,
+                    double minSpan = 2.0, double maxSpan = 30.0) noexcept;
+
+/** Vocal range needed for notes spanning [notesLo, notesHi] (after transpose). When the
+    range is still the default (48-72) it is set automatically to the notes +- 2 semitones
+    (at least an octave); otherwise a union is only offered. */
+struct RangeFit { bool needed = false, automatic = false; int lo = 48, hi = 72; };
+RangeFit planVocalRange(int curLo, int curHi, int notesLo, int notesHi, bool isDefault) noexcept;
+constexpr int kDefaultRangeLo = 48, kDefaultRangeHi = 72;
+
+/** Header status dot: what the host is telling us. `fresh` = an audio block arrived within
+    the last second (Logic only runs a plugin while playing or while its track is selected /
+    record-armed, so a stopped, unselected track sends nothing). */
+enum class HostLink { SyncOff, NoHostInfo, NoTimeline, Stopped, Playing };
+HostLink hostLinkState(bool syncOn, bool fresh, bool hostTimeline, bool playing) noexcept;
+juce::String hostLinkTooltip(HostLink s);
+
 // ---- scrolling ---------------------------------------------------------------------------
 /** Scroll ← → buttons move the view by a quarter of the visible span. */
 inline double scrollStep(double spanSeconds, int direction) noexcept { return 0.25 * spanSeconds * (direction < 0 ? -1 : 1); }

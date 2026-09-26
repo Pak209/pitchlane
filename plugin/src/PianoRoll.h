@@ -58,6 +58,33 @@ public:
     double nowTime() const;
     TransportSnapshot getSnapshot() const { return snap_; }
 
+    // ---- "Go to notes" ------------------------------------------------------------------
+    struct FitResult
+    {
+        bool ok = false;           // false: no notes
+        double start = 0.0, span = 0.0;
+        int bar = 1;               // bar shown at the left edge
+        double firstNoteTime = 0.0;   // song seconds of the first active note (start + offset)
+        int pitchLo = 0, pitchHi = -1; // active notes (after transpose)
+        int notesInView = 0;
+    };
+    /** Scrolls / zooms to the first active (unmuted) note: ~8 bars from its bar line, the
+        vertical window centred on the phrase. Turns follow off (until the next play). The
+        vocal range is the editor's business (see PitchLaneEditor::goToNotes). */
+    FitResult fitToNotes();
+    /** Active (unmuted; all if every note is muted) notes intersecting the visible window. */
+    int numNotesInView() const;
+    double getViewSpan() const;
+    /** Visible pitch rows [lo, hi]. */
+    std::pair<int, int> visiblePitchRange() const;
+    /** Pitch range of the active notes after transpose; false when there are no notes. */
+    static bool activePitchRange(const NoteList& notes, int transpose, int& lo, int& hi);
+    /** Error card shown in the middle of the roll (e.g. a failed analysis); click to dismiss. */
+    void setNotice(const juce::String& text) { notice_ = text; repaint(); }
+    juce::String getNotice() const { return notice_; }
+    /** Called when the "notes are outside this view" overlay is clicked. */
+    std::function<void()> onGoToNotes;
+
     /** Adds a section marker at the playhead and opens the rename box. */
     void addMarkerAtPlayhead();
 
@@ -113,6 +140,10 @@ private:
     void paintRuler(juce::Graphics& g, const View& v);
     void paintLane(juce::Graphics& g, const View& v);
     void paintKeyboard(juce::Graphics& g, const View& v, const Readout& readout);
+    void paintOverlays(juce::Graphics& g, const View& v, const NoteList& notes);
+    int countInView(const View& v, const NoteList& notes) const;
+    juce::Rectangle<float> offscreenHint_, noticeRect_;
+    juce::String notice_;   // clickable "Go to notes" overlay (empty = none)
 
     PitchLaneProcessor& proc_;
     std::vector<Hist> history_;

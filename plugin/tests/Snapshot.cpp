@@ -72,6 +72,80 @@ std::vector<float> sing(double sr, double t0, double t1, const std::function<dou
 
 } // namespace
 
+bool writePng(const juce::Image& img, const juce::File& f)
+{
+    f.deleteFile();
+    juce::FileOutputStream os(f);
+    return os.openedOk() && juce::PNGImageFormat().writeImageToStream(img, os);
+}
+
+/** PL_ANALYZE=<audio file>: the "Dan in Logic" flow. Host stopped at bar 1 (120 BPM), default
+    settings, Load Vocal + ANALYZE VOCAL through the editor; writes <out>-progress.png while the
+    analysis runs and <out> after it finished (auto-fit). Dev tool only. */
+int analyzeSnapshot(const juce::File& audio, const juce::File& out, int width, int height)
+{
+    struct Stopped : juce::AudioPlayHead
+    {
+        juce::Optional<PositionInfo> getPosition() const override
+        {
+            PositionInfo p;
+            p.setTimeInSeconds(0.0);
+            p.setPpqPosition(0.0);
+            p.setBpm(120.0);
+            p.setTimeSignature(TimeSignature { 4, 4 });
+            p.setIsPlaying(false);
+            return p;
+        }
+    } ph;
+    PitchLaneProcessor proc;
+    proc.setPlayHead(&ph);
+    proc.prepareToPlay(44100.0, 512);
+    juce::MidiBuffer midi;
+    juce::AudioBuffer<float> buf(2, 512);
+    buf.clear();
+    proc.processBlock(buf, midi);
+    std::unique_ptr<juce::AudioProcessorEditor> editor(proc.createEditorAndMakeActive());
+    editor->setSize(width, height);
+    editor->setVisible(true);
+    auto* ed = dynamic_cast<PitchLaneEditor*>(editor.get());
+    juce::MessageManager::getInstance()->runDispatchLoopUntil(100);
+    if (!ed->loadVocalFile(audio)) return 1;
+    ed->startAnalysis();
+    bool wroteProgress = false;
+    while (proc.getAnalysis().isRunning() || proc.getLastAnalysis().serial == 0)
+    {
+        juce::MessageManager::getInstance()->runDispatchLoopUntil(20);
+        buf.clear();
+        proc.processBlock(buf, midi);
+        if (!wroteProgress && proc.getAnalysis().getProgress() > 0.3f)
+        {
+            ed->refreshForTest();
+            writePng(editor->createComponentSnapshot(editor->getLocalBounds(), true, 1.0f),
+                     out.getSiblingFile(out.getFileNameWithoutExtension() + "-progress.png"));
+            wroteProgress = true;
+        }
+    }
+    for (int i = 0; i < 10; ++i)
+    {
+        buf.clear();
+        proc.processBlock(buf, midi);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil(20);
+    }
+    const bool ok = writePng(editor->createComponentSnapshot(editor->getLocalBounds(), true, 1.0f), out);
+    if (proc.getReference().size() > 0)
+    {
+        // Also: scrolled back to bar 1 (what Dan saw), with the "notes outside this view" card.
+        ed->getRoll().setViewStart(0.0);
+        ed->getRoll().repaint();
+        writePng(editor->createComponentSnapshot(editor->getLocalBounds(), true, 1.0f),
+                 out.getSiblingFile(out.getFileNameWithoutExtension() + "-away.png"));
+    }
+    std::printf("%s %s: %s\n", ok ? "wrote" : "FAILED", out.getFullPathName().toRawUTF8(), ed->getStatusMessage().toRawUTF8());
+    editor.reset();
+    proc.editorBeingDeleted(nullptr);
+    return ok ? 0 : 1;
+}
+
 int main(int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI init;
@@ -79,6 +153,9 @@ int main(int argc, char** argv)
                                   : juce::File::getCurrentWorkingDirectory().getChildFile("snapshot.png"));
     const int width = argc > 3 ? std::atoi(argv[2]) : PitchLaneEditor::kDefaultW;
     const int height = argc > 3 ? std::atoi(argv[3]) : PitchLaneEditor::kDefaultH;
+
+    if (const char* analyze = std::getenv("PL_ANALYZE"))
+        return analyzeSnapshot(juce::File(juce::String::fromUTF8(analyze)), out, width, height);
 
     PitchLaneProcessor proc;
     const double secondsPerBar = 4 * 60.0 / kBpm;

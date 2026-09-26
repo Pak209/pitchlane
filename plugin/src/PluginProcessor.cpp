@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 
+#include "Log.h"
 #include "Params.h"
 #include "PluginEditor.h"
 #include "StateCodec.h"
@@ -21,11 +22,24 @@ PitchLaneProcessor::PitchLaneProcessor()
     timeSigParam_ = apvts_.getRawParameterValue(params::timeSig);
 
     analysis_.onFinished = [this](const AnalysisManager::Result& r) {
+        // Message thread (AsyncUpdater). Notes land in the model here; the editor picks up
+        // lastAnalysis_ on its next timer tick to report the outcome and fit the view.
         if (r.status == AnalysisManager::Status::Finished)
         {
             reference_.setNotes(r.notes, true); // undoable
             reference_.setSourcePath(r.file.getFullPathName());
+            log::write("analysis", "reference model now holds " + juce::String(reference_.getNotes().size()) + " notes");
         }
+        AnalysisOutcome o;
+        o.serial = lastAnalysis_.serial + 1;
+        o.status = r.status;
+        o.message = r.message;
+        o.file = r.file;
+        o.total = static_cast<int>(r.notes.size());
+        o.muted = r.numMuted;
+        o.decodeMs = r.decodeMs;
+        o.analyzeMs = r.analyzeMs;
+        lastAnalysis_ = o;
     };
 }
 

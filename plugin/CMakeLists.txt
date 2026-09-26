@@ -65,9 +65,22 @@ target_sources(PitchLaneShared INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Theme.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Widgets.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/LiveNotePanel.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/SettingsPanel.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/SettingsPanel.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/Log.cpp)
 target_include_directories(PitchLaneShared INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+# Build id shown in the diagnostics log (the release workflow passes the full version).
+if(NOT PITCHLANE_BUILD_ID)
+    execute_process(COMMAND git rev-parse --short=7 HEAD
+                    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+                    OUTPUT_VARIABLE _pl_git_sha OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    set(PITCHLANE_BUILD_ID "${_pl_git_sha}")
+    if(NOT PITCHLANE_BUILD_ID)
+        set(PITCHLANE_BUILD_ID "local")
+    endif()
+endif()
 target_compile_definitions(PitchLaneShared INTERFACE
+    PITCHLANE_BUILD_ID="${PITCHLANE_BUILD_ID}"
+    PITCHLANE_VERSION="${CMAKE_PROJECT_VERSION}"
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_VST3_CAN_REPLACE_VST2=0
@@ -97,6 +110,7 @@ if(PITCHLANE_BUILD_TESTS)
     target_compile_definitions(PitchLaneTests PRIVATE
         JucePlugin_Name="Pitch Lane"
         PITCHLANE_TESTS=1
+        JUCE_MODAL_LOOPS_PERMITTED=1
         PITCHLANE_TEST_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
     target_link_libraries(PitchLaneTests PRIVATE
         PitchLaneShared

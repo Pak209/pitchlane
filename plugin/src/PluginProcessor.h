@@ -57,6 +57,19 @@ public:
     /** Restart the free-running clock (used when there is no host timeline). */
     void restartFreeClock() noexcept { restartFreeClock_ = true; }
 
+    /** Outcome of the last Analyze Vocal job (message thread only). The editor watches
+        `serial` to show the result and auto-fit the roll, even if it was closed meanwhile. */
+    struct AnalysisOutcome
+    {
+        uint32_t serial = 0;
+        AnalysisManager::Status status = AnalysisManager::Status::Idle;
+        juce::String message;
+        juce::File file;
+        int total = 0, muted = 0;
+        double decodeMs = 0.0, analyzeMs = 0.0;
+    };
+    const AnalysisOutcome& getLastAnalysis() const noexcept { return lastAnalysis_; }
+
     int getOctaveConvention() const noexcept;
     double getSampleRateSafe() const noexcept { return sampleRate_; }
     int getDetectorLatencySamples() const noexcept { return detector_.latencySamples(); }
@@ -70,6 +83,7 @@ private:
     ReferenceModel reference_;
     MarkerModel markers_;
     AnalysisManager analysis_;
+    AnalysisOutcome lastAnalysis_;
 
     // Audio-thread state (all allocated in prepareToPlay).
     PitchDetector detector_;

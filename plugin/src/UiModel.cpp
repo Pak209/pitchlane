@@ -165,4 +165,83 @@ int nearestScaleNote(double midi, int key, ScaleType scale) noexcept
     return best;
 }
 
+
+TimeFit planTimeFit(const TempoMap& tempo, double firstNoteTime, int bars, double minSpan, double maxSpan) noexcept
+{
+    TimeFit f;
+    const auto bb = tempo.barBeatAt(firstNoteTime);
+    f.bar = std::max(1, bb.bar);
+    double start = tempo.timeOfBar(f.bar);
+    if (start > firstNoteTime) start = firstNoteTime;
+    if (firstNoteTime - start < 0.2) start -= 0.5 * tempo.secondsPerBeatAt(firstNoteTime);
+    const double span = tempo.timeOfBar(f.bar + std::max(1, bars)) - tempo.timeOfBar(f.bar);
+    f.span = jlimit(minSpan, maxSpan, span > 0.0 ? span : 8.0);
+    // The first note must be well inside the window even when the span was clamped.
+    if (firstNoteTime > start + 0.5 * f.span) start = firstNoteTime - 0.1 * f.span;
+    f.start = start;
+    return f;
+}
+
+RangeFit planVocalRange(int curLo, int curHi, int notesLo, int notesHi, bool isDefault) noexcept
+{
+    RangeFit r;
+    r.lo = curLo;
+    r.hi = curHi;
+    if (notesHi < notesLo || (notesLo >= curLo && notesHi <= curHi)) return r;
+    r.needed = true;
+    r.automatic = isDefault;
+    if (isDefault)
+    {
+        r.lo = notesLo - 2;
+        r.hi = notesHi + 2;
+        if (r.hi - r.lo < 12)
+        {
+            const int grow = 12 - (r.hi - r.lo);
+            r.lo -= grow / 2;
+            r.hi += grow - grow / 2;
+        }
+    }
+    else
+    {
+        r.lo = std::min(curLo, notesLo - 2);
+        r.hi = std::max(curHi, notesHi + 2);
+    }
+    r.lo = jlimit(24, 96, r.lo);    // parameter limits
+    r.hi = jlimit(r.lo + 11, 108, r.hi);
+    return r;
+}
+
+HostLink hostLinkState(bool syncOn, bool fresh, bool hostTimeline, bool playing) noexcept
+{
+    if (!syncOn) return HostLink::SyncOff;
+    if (!fresh) return HostLink::NoHostInfo;
+    if (!hostTimeline) return HostLink::NoTimeline;
+    return playing ? HostLink::Playing : HostLink::Stopped;
+}
+
+String hostLinkTooltip(HostLink s)
+{
+    const String legend = String::fromUTF8("\n\nGreen = Logic playing (synced)  \xc2\xb7  Amber = Logic stopped (synced)  \xc2\xb7  "
+                          "Grey = no transport info from Logic");
+    switch (s)
+    {
+        case HostLink::SyncOff:
+            return String("Logic Sync off: free-running clock at the manual BPM.") + legend;
+        case HostLink::NoHostInfo:
+            return String("Grey: Logic Sync is on, but Logic is not sending audio to Pitch Lane right now, so "
+                                     "there is no transport or tempo info (the BPM shown is the manual one). Logic only "
+                                     "runs a plugin while playing, or while its track is selected / record-armed. "
+                                     "Press play to sync.") + legend;
+        case HostLink::NoTimeline:
+            return String("Grey: the host sends audio but no timeline, so the free-running clock is used."
+                                    ) + legend;
+        case HostLink::Stopped:
+            return String("Amber: synced to Logic, transport stopped. Live pitch is compared with the note "
+                                     "under Logic's playhead.") + legend;
+        case HostLink::Playing:
+            return String("Green: synced to Logic, playing.") + legend;
+    }
+    return {};
+}
+
 } // namespace pitchlane::ui

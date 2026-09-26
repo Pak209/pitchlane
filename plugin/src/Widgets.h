@@ -124,7 +124,10 @@ public:
 class StatusDot : public juce::Component, public juce::SettableTooltipClient
 {
 public:
-    enum class State { Off, Waiting, Synced, Playing };
+    /** Off = Logic Sync off (hollow), NoInfo = grey (no transport info from the host),
+        Stopped = amber (synced, host stopped), Playing = green (synced, host playing). */
+    enum class State { Off, NoInfo, Stopped, Playing };
+    State getState() const noexcept { return state_; }
     void setState(State s, const juce::String& tip);
     void paint(juce::Graphics& g) override;
 

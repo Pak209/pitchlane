@@ -1,5 +1,7 @@
 #include "AnalysisManager.h"
 
+#include "Log.h"
+
 namespace pitchlane {
 
 juce::String supportedFormatsText(juce::AudioFormatManager& formats)
@@ -143,13 +145,41 @@ bool AnalysisManager::canOpen(const juce::File& f) const
     return formats_.findFormatForFileExtension(f.getFileExtension()) != nullptr;
 }
 
+juce::String AnalysisManager::summaryText(const Result& r)
+{
+    const auto name = r.file.getFileName();
+    const int total = static_cast<int>(r.notes.size());
+    if (total == 0)
+        return "No notes found in " + name + ": no clear sung pitch was detected. Use an isolated lead-vocal stem "
+               "(not a full mix), check that the file is not silent, then analyse again.";
+    juce::String s = juce::String(total) + (total == 1 ? " note" : " notes") + " found";
+    if (r.numMuted > 0)
+    {
+        s << " (" << r.numMuted << " muted as harmony";
+        if (r.activeCount() == 0) s << ", none left active: right-click a note > Unmute";
+        s << ")";
+    }
+    return s + " in " + name;
+}
+
 void AnalysisManager::run()
 {
     Result res;
     res.file = file_;
+    const double t0 = juce::Time::getMillisecondCounterHiRes();
+    log::write("analysis", "start: \"" + file_.getFullPathName() + "\" (" + juce::String(file_.getSize() / 1024) + " KB, "
+                               + (file_.existsAsFile() ? "exists" : "MISSING") + ")");
     auto finish = [&](Status st, const juce::String& msg) {
         res.status = st;
         res.message = msg;
+        const auto total = juce::String((juce::Time::getMillisecondCounterHiRes() - t0) / 1000.0, 2);
+        if (st == Status::Finished)
+            log::write("analysis", "done in " + total + " s (decode " + juce::String(juce::roundToInt(res.decodeMs)) + " ms, analyze "
+                                       + juce::String(juce::roundToInt(res.analyzeMs)) + " ms): " + juce::String(res.notes.size())
+                                       + " notes, " + juce::String(res.numMuted) + " muted, " + juce::String(res.activeCount())
+                                       + " active");
+        else
+            log::write("analysis", juce::String(st == Status::Cancelled ? "cancelled" : "FAILED") + " after " + total + " s: " + msg);
         {
             const juce::ScopedLock sl(resultLock_);
             result_ = res;
@@ -162,6 +192,7 @@ void AnalysisManager::run()
         progress_ = 0.15f * p;   // decoding = 0 - 15 % of progress
         return !(cancel_.load() || threadShouldExit());
     });
+    res.decodeMs = juce::Time::getMillisecondCounterHiRes() - t0;
     if (decoded.cancelled)
     {
         finish(Status::Cancelled, "Analysis cancelled");
@@ -169,17 +200,26 @@ void AnalysisManager::run()
     }
     if (!decoded.error.isEmpty())
     {
-        finish(Status::Failed, decoded.error);
+        finish(Status::Failed, "Analysis failed: " + decoded.error);
         return;
     }
     const auto& mono = decoded.mono;
     const double sr = decoded.sampleRate;
+    res.sampleRate = sr;
+    res.numChannels = decoded.numChannels;
+    res.formatName = decoded.formatName;
+    res.audioSeconds = static_cast<double>(mono.size()) / sr;
+    log::write("analysis", "decoded " + decoded.formatName + ", " + juce::String(juce::roundToInt(sr)) + " Hz, "
+                               + juce::String(decoded.numChannels) + " ch, " + juce::String(res.audioSeconds, 2) + " s in "
+                               + juce::String(juce::roundToInt(res.decodeMs)) + " ms");
 
     status_ = Status::Analyzing;
+    const double t1 = juce::Time::getMillisecondCounterHiRes();
     auto ar = analyzeMonophonic(mono.data(), mono.size(), sr, settings_, [this](float p) {
         progress_ = 0.15f + 0.85f * p;
         return !(cancel_.load() || threadShouldExit());
     });
+    res.analyzeMs = juce::Time::getMillisecondCounterHiRes() - t1;
 
     if (ar.cancelled)
     {
@@ -188,12 +228,14 @@ void AnalysisManager::run()
     }
     if (!ar.error.empty())
     {
-        finish(Status::Failed, juce::String(ar.error));
+        finish(Status::Failed, "Analysis failed: " + juce::String(ar.error));
         return;
     }
     res.notes = std::move(ar.notes);
+    for (const auto& n : res.notes) res.numMuted += n.muted() ? 1 : 0;
     progress_ = 1.f;
-    finish(Status::Finished, juce::String(res.notes.size()) + " notes found in " + file_.getFileName());
+    // Zero notes is reported as a failure so the UI shows it as an error, never a silent grid.
+    finish(res.notes.empty() ? Status::Failed : Status::Finished, summaryText(res));
 }
 
 void AnalysisManager::handleAsyncUpdate()

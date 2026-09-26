@@ -114,6 +114,7 @@ jobs:
           -DPITCHLANE_DISTRIBUTION=ON
           -DPITCHLANE_COPY_AFTER_BUILD=OFF
           -DPITCHLANE_STANDALONE=OFF
+          -DPITCHLANE_BUILD_ID="${{ steps.mode.outputs.version }}"
 
       - name: Build AU + tests
         run: cmake --build build --target PitchLane_AU pitchlane_core_tests PitchLaneTests

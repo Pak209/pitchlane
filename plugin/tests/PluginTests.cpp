@@ -1008,3 +1008,398 @@ TEST_CASE("Feedback: live frames from the processor are scored on time / late ag
         proc.setPlayHead(nullptr);
     }
 }
+
+// ================================================================================================
+// Integration: the full "Load Vocal -> ANALYZE VOCAL -> notes -> visible" path through the real
+// editor, reproducing Dan's first Logic session (late vocal entry at 15 s, melody up to G5,
+// 120 BPM, host stopped at bar 1, default vocal range C3-C5). Synthetic audio only.
+// ================================================================================================
+namespace {
+
+std::vector<testsig::MelodyNote> lateEntryMelody()
+{
+    const int mel[] = { 60, 62, 64, 67, 69, 72, 74, 76, 79, 76, 74, 72, 69, 67, 64, 62 };
+    std::vector<testsig::MelodyNote> notes;
+    for (int i = 0; i < 16; ++i) notes.push_back({ 15.0 + 0.5 * i, 0.45, mel[i] });
+    return notes;
+}
+
+juce::File integrationDir()
+{
+    // Folder and file names with spaces and a leading digit, like "0 Lead Vocals.m4a" inside
+    // a Logic project's "Audio Files" folder.
+    auto d = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                 .getChildFile("Pitch Lane CI Project " + juce::String(juce::Time::currentTimeMillis()))
+                 .getChildFile("Audio Files");
+    d.createDirectory();
+    return d;
+}
+
+void setParam(PitchLaneProcessor& proc, const char* id, float v)
+{
+    auto* p = proc.getApvts().getParameter(id);
+    p->setValueNotifyingHost(p->convertTo0to1(v));
+}
+
+juce::TextButton* findButton(juce::Component& root, const juce::String& text)
+{
+    for (auto* c : root.getChildren())
+        if (auto* b = dynamic_cast<juce::TextButton*>(c); b != nullptr && b->getButtonText() == text) return b;
+    return nullptr;
+}
+
+struct StoppedHost
+{
+    PitchLaneProcessor proc;
+    FakePlayHead ph;
+    juce::AudioBuffer<float> buf { 2, 512 };
+    juce::MidiBuffer midi;
+    StoppedHost()
+    {
+        proc.setPlayConfigDetails(2, 2, 44100.0, 512);
+        proc.prepareToPlay(44100.0, 512);
+        ph.playing = false;   // Logic stopped at the project start (bar 1)
+        ph.time = 0.0;
+        ph.bpm = 120.0;
+        ph.num = 4;
+        proc.setPlayHead(&ph);
+        block();
+    }
+    void block()
+    {
+        buf.clear();
+        proc.processBlock(buf, midi);
+    }
+};
+
+struct EditorRun
+{
+    std::unique_ptr<juce::AudioProcessorEditor> ed;
+    PitchLaneEditor* pe = nullptr;
+    PitchLaneProcessor& proc;
+    explicit EditorRun(PitchLaneProcessor& p) : proc(p)
+    {
+        ed.reset(p.createEditorAndMakeActive());
+        pe = dynamic_cast<PitchLaneEditor*>(ed.get());
+        ed->setSize(PitchLaneEditor::kDefaultW, PitchLaneEditor::kDefaultH);
+        for (int i = 0; i < 4; ++i) pe->refreshForTest();
+    }
+    ~EditorRun()
+    {
+        ed.reset();
+        proc.editorBeingDeleted(nullptr);
+    }
+    /** ANALYZE VOCAL, then pump the message loop (background thread -> AsyncUpdater ->
+        processor -> editor timer) until the editor has handled the outcome. */
+    bool analyzeAndWait(double timeoutSec = 120.0)
+    {
+        const auto serial = proc.getLastAnalysis().serial;
+        pe->startAnalysis();
+        const double t0 = juce::Time::getMillisecondCounterHiRes();
+        bool sawProgressCard = false;
+        while (juce::Time::getMillisecondCounterHiRes() - t0 < timeoutSec * 1000.0)
+        {
+            if (proc.getAnalysis().isRunning() && !sawProgressCard)
+            {
+                // Progress UI while running: CANCEL + % on the header button.
+                sawProgressCard = findButton(*pe, "ANALYZE VOCAL") == nullptr;
+            }
+            juce::MessageManager::getInstance()->runDispatchLoopUntil(20);
+            pe->refreshForTest();
+            if (proc.getLastAnalysis().serial != serial && !proc.getAnalysis().isRunning()) break;
+        }
+        pe->refreshForTest();
+        pe->refreshForTest();
+        return proc.getLastAnalysis().serial != serial;
+    }
+};
+
+juce::File useTempLog()
+{
+    // Tests never write to the user's real log.
+    const auto logFile = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("pitchlane-test.log");
+#if !JUCE_WINDOWS
+    ::setenv("PITCHLANE_LOG_FILE", logFile.getFullPathName().toRawUTF8(), 1);
+#endif
+    return logFile;
+}
+
+void checkLoadAnalyzeFit(const juce::File& vocal, double refOffsetMs)
+{
+    INFO("file: " << vocal.getFullPathName() << ", offset " << refOffsetMs << " ms");
+    const auto logFile = useTempLog();
+    logFile.deleteFile();
+    StoppedHost host;
+    if (refOffsetMs != 0.0) setParam(host.proc, params::refOffset, static_cast<float>(refOffsetMs));
+    EditorRun run(host.proc);
+    auto& roll = run.pe->getRoll();
+    CHECK(!run.pe->getGoToNotesButton().isVisible());
+
+    // 1. Load Vocal (same code path as the file chooser / drag and drop).
+    CHECK(run.pe->loadVocalFile(vocal));
+    // 2. ANALYZE VOCAL on the background thread.
+    const double t0 = juce::Time::getMillisecondCounterHiRes();
+    CHECK(run.analyzeAndWait());
+    const double secs = (juce::Time::getMillisecondCounterHiRes() - t0) / 1000.0;
+    const auto& outcome = host.proc.getLastAnalysis();
+    CHECK(outcome.status == AnalysisManager::Status::Finished);
+
+    // 3. Notes landed in the processor state (the model the audio-side scorer / roll use).
+    const auto notes = host.proc.getReference().getNotes();
+    int active = 0, activeHi = 0;
+    double firstActive = -1.0;
+    for (const auto& n : notes)
+        if (!n.muted())
+        {
+            ++active;
+            activeHi = std::max(activeHi, n.pitch);
+            if (firstActive < 0.0) firstActive = n.start;
+        }
+    std::cout << "    integration: " << vocal.getFileName() << ": " << notes.size() << " notes, " << active
+              << " active, first active " << firstActive << " s, highest " << activeHi << ", analysis "
+              << secs << " s (decode " << outcome.decodeMs << " ms, analyze " << outcome.analyzeMs << " ms)\n";
+    CHECK(notes.size() >= 14);
+    CHECK(active >= 14);
+    CHECK_NEAR(firstActive, 15.0, 0.08);   // the low start of the run is kept (not muted as harmony)
+    CHECK_EQ(activeHi, 79);                 // reaches G5
+    CHECK_EQ(host.proc.getReference().getSourcePath(), vocal.getFullPathName());
+
+    // 4. Clear status, never a silent grid.
+    const auto status = run.pe->getStatusMessage();
+    INFO("status: " << status);
+    CHECK(status.contains(juce::String(notes.size()) + " notes found"));
+    CHECK(run.pe->getStatusKind() == PitchLaneEditor::ToastKind::Success);
+    CHECK(status.contains("showing bar"));
+    CHECK(run.pe->getGoToNotesButton().isVisible());
+    CHECK(roll.getNotice().isEmpty());
+
+    // 5. Auto-fit: the view (host stopped at 0) moved to the notes and shows them.
+    const double firstSong = firstActive + refOffsetMs * 0.001;
+    const double start = roll.getViewStart(), span = roll.getViewSpan();
+    std::cout << "    integration: view " << start << " s + " << span << " s, pitch rows "
+              << roll.visiblePitchRange().first << ".." << roll.visiblePitchRange().second << ", "
+              << roll.numNotesInView() << " notes in view, range "
+              << host.proc.getApvts().getRawParameterValue(params::lowNote)->load() << ".."
+              << host.proc.getApvts().getRawParameterValue(params::highNote)->load() << "\n";
+    CHECK(start <= firstSong);
+    CHECK(start + span > firstSong + 4.0);
+    CHECK(start > firstSong - 2.5);            // the bar line before the entry, not bar 1
+    CHECK_NEAR(span, 16.0, 0.51);              // 8 bars at 120 BPM
+    CHECK(!roll.getFollow());
+    CHECK(roll.numNotesInView() >= 14);
+    // Vocal range was still the default (C3-C5): expanded automatically to cover G5.
+    const int lo = juce::roundToInt(host.proc.getApvts().getRawParameterValue(params::lowNote)->load());
+    const int hi = juce::roundToInt(host.proc.getApvts().getRawParameterValue(params::highNote)->load());
+    CHECK(lo <= 60);
+    CHECK(hi >= 79);
+    const auto vis = roll.visiblePitchRange();
+    CHECK(vis.first <= 60);
+    CHECK(vis.second >= 79);
+
+    // The roll keeps showing them (timer ticks with the transport still stopped at 0).
+    for (int i = 0; i < 30; ++i)
+    {
+        host.block();
+        run.pe->refreshForTest();
+    }
+    CHECK(roll.numNotesInView() >= 14);
+    const auto img = run.ed->createComponentSnapshot(run.ed->getLocalBounds(), true, 1.0f);
+    CHECK_EQ(img.getWidth(), PitchLaneEditor::kDefaultW);
+
+    // 6. Diagnostics log.
+    const auto logText = logFile.loadFileAsString();
+    std::cout << "    log: " << logText.fromLastOccurrenceOf("[analysis] done", true, false).upToFirstOccurrenceOf("\n", false, false) << "\n";
+    CHECK(logText.contains("[load] vocal chosen: \"" + vocal.getFullPathName() + "\""));
+    CHECK(logText.contains("[analysis] decoded"));
+    CHECK(logText.contains("[analysis] done in"));
+    CHECK(logText.contains("[view] auto-fit"));
+}
+
+} // namespace
+
+TEST_CASE("Integration: Load Vocal -> analysis -> notes -> auto-fit (stereo WAV, late entry, host stopped)")
+{
+    const auto dir = integrationDir();
+    const auto wavFile = dir.getChildFile("0 Lead Vocals Test.wav");
+    const auto audio = testsig::melody(44100.0, 26.0, lateEntryMelody());
+    juce::WavAudioFormat wav;
+    CHECK(writeStereo(wav, wavFile, 44100.0, 16, audio));
+    checkLoadAnalyzeFit(wavFile, 0.0);
+    // Reference offset +2 s: notes (and the fit) move 2 s later on the song timeline.
+    checkLoadAnalyzeFit(wavFile, 2000.0);
+    dir.getParentDirectory().deleteRecursively();
+}
+
+#if JUCE_MAC
+TEST_CASE("Integration (macOS): stereo AAC M4A \"0 Lead Vocals Test.m4a\" -> analysis -> notes visible after auto-fit")
+{
+    const auto dir = integrationDir();
+    const auto src = dir.getChildFile("src.wav");
+    const auto m4a = dir.getChildFile("0 Lead Vocals Test.m4a");
+    const auto audio = testsig::melody(44100.0, 26.0, lateEntryMelody());
+    juce::WavAudioFormat wav;
+    CHECK(writeStereo(wav, src, 44100.0, 16, audio));
+    CHECK(runTool({ "/usr/bin/afconvert", "-f", "m4af", "-d", "aac", src.getFullPathName(), m4a.getFullPathName() }));
+    CHECK(m4a.existsAsFile());
+    {
+        AnalysisManager am;
+        juce::AudioFormatManager& fm = am.getFormats();
+        std::unique_ptr<juce::AudioFormatReader> r(fm.createReaderFor(m4a));
+        CHECK(r != nullptr);
+        if (r != nullptr) CHECK_EQ(static_cast<int>(r->numChannels), 2);   // stereo AAC
+    }
+    checkLoadAnalyzeFit(m4a, 0.0);
+    dir.getParentDirectory().deleteRecursively();
+}
+#endif
+
+TEST_CASE("Integration: zero notes / unreadable file show a visible error (never a silent empty grid)")
+{
+    useTempLog();
+    const auto dir = integrationDir();
+    StoppedHost host;
+    EditorRun run(host.proc);
+
+    // Missing file: rejected at load with a reason.
+    CHECK(!run.pe->loadVocalFile(dir.getChildFile("9 Missing Take.wav")));
+    CHECK(run.pe->getStatusKind() == PitchLaneEditor::ToastKind::Error);
+    CHECK(run.pe->getStatusMessage().contains("File not found"));
+
+    // Silent file: analysis runs, finds nothing, says so in the hint bar and on the roll.
+    const auto silent = dir.getChildFile("1 Silent Vocal.wav");
+    juce::WavAudioFormat wav;
+    CHECK(writeStereo(wav, silent, 44100.0, 16, std::vector<float>(44100 * 3, 0.f)));
+    CHECK(run.pe->loadVocalFile(silent));
+    CHECK(run.analyzeAndWait());
+    CHECK(host.proc.getLastAnalysis().status == AnalysisManager::Status::Failed);
+    const auto msg = run.pe->getStatusMessage();
+    INFO("status: " << msg);
+    CHECK(msg.startsWith("No notes found in 1 Silent Vocal.wav"));
+    CHECK(run.pe->getStatusKind() == PitchLaneEditor::ToastKind::Error);
+    CHECK(run.pe->getRoll().getNotice() == msg);
+    CHECK(host.proc.getReference().getNotes().empty());
+    for (int i = 0; i < 20; ++i) run.pe->refreshForTest();
+    CHECK(run.pe->getStatusMessage() == msg);   // sticky until dismissed / next action
+
+    // Damaged file: "Analysis failed: ..." with the reason.
+    const auto bad = dir.getChildFile("2 Broken.wav");
+    bad.replaceWithText("RIFF not really a wave file");
+    CHECK(run.pe->loadVocalFile(bad));
+    CHECK(run.analyzeAndWait());
+    CHECK(run.pe->getStatusMessage().startsWith("Analysis failed:"));
+    CHECK(run.pe->getRoll().getNotice().isNotEmpty());
+    dir.getParentDirectory().deleteRecursively();
+}
+
+TEST_CASE("Integration: custom vocal range is not overwritten; the editor offers to expand it")
+{
+    useTempLog();
+    StoppedHost host;
+    setParam(host.proc, params::lowNote, 50.f);
+    setParam(host.proc, params::highNote, 74.f);
+    host.proc.getReference().setNotes({ { 20.0, 0.5, 64 }, { 20.5, 0.5, 79 }, { 21.0, 0.5, 67 } }, false);
+    EditorRun run(host.proc);   // reopened with notes out of view -> jumps to them once
+    auto& roll = run.pe->getRoll();
+    CHECK(roll.getViewStart() > 17.0);
+    CHECK(roll.numNotesInView() >= 2);
+    CHECK_EQ(juce::roundToInt(host.proc.getApvts().getRawParameterValue(params::highNote)->load()), 74);
+    const auto action = run.pe->getStatusActionText();
+    INFO("action: " << action << " status: " << run.pe->getStatusMessage());
+    CHECK(action.startsWith("Expand range to"));
+    if (auto* b = findButton(*run.pe, action); b != nullptr && b->onClick) b->onClick();
+    CHECK(juce::roundToInt(host.proc.getApvts().getRawParameterValue(params::highNote)->load()) >= 79);
+    CHECK_EQ(juce::roundToInt(host.proc.getApvts().getRawParameterValue(params::lowNote)->load()), 50);
+    CHECK_EQ(roll.numNotesInView(), 3);
+}
+
+TEST_CASE("UI: status dot = green playing / amber stopped / grey no host info, with tooltips")
+{
+    using ui::HostLink;
+    CHECK(ui::hostLinkState(false, true, true, true) == HostLink::SyncOff);
+    CHECK(ui::hostLinkState(true, false, true, false) == HostLink::NoHostInfo);
+    CHECK(ui::hostLinkState(true, true, false, true) == HostLink::NoTimeline);
+    CHECK(ui::hostLinkState(true, true, true, false) == HostLink::Stopped);
+    CHECK(ui::hostLinkState(true, true, true, true) == HostLink::Playing);
+    CHECK(ui::hostLinkTooltip(HostLink::Stopped).contains("Amber"));
+    CHECK(ui::hostLinkTooltip(HostLink::NoHostInfo).contains("not sending audio"));
+
+    // Never processed a block (Logic stopped, track not selected): grey, not amber.
+    {
+        PitchLaneProcessor proc;
+        EditorRun run(proc);
+        for (int i = 0; i < 8; ++i) run.pe->refreshForTest();
+        CHECK(run.pe->getStatusDot().getState() == StatusDot::State::NoInfo);
+        CHECK(run.pe->getStatusDot().getTooltip().contains("Grey"));
+    }
+    StoppedHost host;
+    EditorRun run(host.proc);
+    auto tick = [&] { for (int i = 0; i < 7; ++i) run.pe->refreshForTest(); };
+    host.block();
+    tick();
+    CHECK(run.pe->getStatusDot().getState() == StatusDot::State::Stopped);   // amber
+    host.ph.playing = true;
+    host.block();
+    tick();
+    CHECK(run.pe->getStatusDot().getState() == StatusDot::State::Playing);   // green
+    juce::Thread::sleep(1100);   // no audio for > 1 s: the host is not telling us anything
+    tick();
+    CHECK(run.pe->getStatusDot().getState() == StatusDot::State::NoInfo);
+    setParam(host.proc, params::hostSync, 0.f);
+    host.block();
+    tick();
+    CHECK(run.pe->getStatusDot().getState() == StatusDot::State::Off);
+}
+
+TEST_CASE("UI: planTimeFit / planVocalRange")
+{
+    TempoMap tm;   // 120 BPM 4/4
+    auto f = ui::planTimeFit(tm, 15.0);
+    CHECK_EQ(f.bar, 8);
+    CHECK_NEAR(f.start, 14.0, 1e-9);
+    CHECK_NEAR(f.span, 16.0, 1e-9);
+    f = ui::planTimeFit(tm, 16.0);   // right on bar 9: half a beat of lead-in
+    CHECK_EQ(f.bar, 9);
+    CHECK_NEAR(f.start, 15.75, 1e-9);
+    tm.setConstant(60.0, 4, 4);      // 8 bars = 32 s -> clamped to 30 s
+    f = ui::planTimeFit(tm, 40.0);
+    CHECK_NEAR(f.span, 30.0, 1e-9);
+    CHECK(f.start <= 40.0);
+
+    auto r = ui::planVocalRange(48, 72, 55, 79, true);
+    CHECK(r.needed);
+    CHECK(r.automatic);
+    CHECK_EQ(r.lo, 53);
+    CHECK_EQ(r.hi, 81);
+    r = ui::planVocalRange(50, 74, 55, 79, false);
+    CHECK(r.needed);
+    CHECK(!r.automatic);
+    CHECK_EQ(r.lo, 50);
+    CHECK_EQ(r.hi, 81);
+    r = ui::planVocalRange(48, 72, 55, 70, true);
+    CHECK(!r.needed);
+}
+
+TEST_CASE("Integration: optional local files through the editor path via PITCHLANE_EXTRA_AUDIO (not in CI)")
+{
+    // PITCHLANE_EXTRA_AUDIO=/path/0\ Lead\ Vocals.wav PitchLaneTests: Load Vocal -> analysis ->
+    // auto-fit through the real editor with the host stopped at bar 1, printing what the user sees.
+    const auto list = juce::SystemStats::getEnvironmentVariable("PITCHLANE_EXTRA_AUDIO", {});
+    if (list.isEmpty()) return;
+    for (const auto& path : juce::StringArray::fromTokens(list, ":", {}))
+    {
+        const juce::File f(path);
+        StoppedHost host;
+        if (!host.proc.getAnalysis().canOpen(f)) continue;
+        EditorRun run(host.proc);
+        CHECK(run.pe->loadVocalFile(f));
+        CHECK(run.analyzeAndWait(300.0));
+        auto& roll = run.pe->getRoll();
+        const auto vis = roll.visiblePitchRange();
+        std::printf("    %s: status \"%s\"; view %.2f s + %.2f s, rows %d..%d, %d notes in view, range %d..%d\n",
+                    f.getFileName().toRawUTF8(), run.pe->getStatusMessage().toRawUTF8(), roll.getViewStart(),
+                    roll.getViewSpan(), vis.first, vis.second, roll.numNotesInView(),
+                    juce::roundToInt(host.proc.getApvts().getRawParameterValue(params::lowNote)->load()),
+                    juce::roundToInt(host.proc.getApvts().getRawParameterValue(params::highNote)->load()));
+        CHECK(roll.numNotesInView() > 0);
+    }
+}

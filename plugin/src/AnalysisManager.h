@@ -44,9 +44,19 @@ public:
     {
         Status status = Status::Idle;
         NoteList notes;
-        juce::String message;
+        juce::String message;   // user-facing status / error text (never empty when finished)
         juce::File file;
+        // Diagnostics (also written to the log).
+        int numMuted = 0;             // notes flagged as harmony / bleed (muted)
+        double decodeMs = 0.0, analyzeMs = 0.0;
+        double audioSeconds = 0.0, sampleRate = 0.0;
+        int numChannels = 0;
+        juce::String formatName;
+        int activeCount() const noexcept { return static_cast<int>(notes.size()) - numMuted; }
     };
+
+    /** "153 notes found (29 muted as harmony) in <file>" / "No notes found in ..." (tested). */
+    static juce::String summaryText(const Result& r);
 
     AnalysisManager();
     ~AnalysisManager() override;
@@ -59,6 +69,8 @@ public:
     bool isRunning() const { return isThreadRunning(); }
 
     float getProgress() const noexcept { return progress_.load(); }
+    /** The file of the current / last job (message thread). */
+    juce::File getFile() const { return file_; }
     Status getStatus() const noexcept { return status_.load(); }
     juce::String getStatusText() const;
 
