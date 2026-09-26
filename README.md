@@ -7,13 +7,19 @@ It never tunes or processes the voice. It shows:
 
 - your live sung pitch as a line on a scrolling chromatic piano roll;
 - the reference melody as target bars at their pitches and song times;
-- while you hold a target note: **FLAT / IN TUNE / SHARP** plus the offset in cents (in tune = within ±10 cents by default, adjustable);
-- key + scale row highlighting and a selectable vocal range (low/high note).
+- while you hold a target note: the **LIVE NOTE** panel with the offset in cents and a SHARP / IN TUNE / FLAT meter
+  (in tune = within ±10 cents by default, adjustable), plus the detector's confidence;
+- portions of a note sung outside the tolerance turn orange-red on the roll;
+- key + scale, a selectable vocal range, bar numbers, and your own section markers (Verse, Chorus, ...).
+
+![Pitch Lane UI (rendered with test data)](docs/design/ui-restyle.png)
+
+The layout follows the design mockup in [`docs/design/reference-mockup.png`](docs/design/reference-mockup.png).
 
 The reference melody can come from an **isolated lead-vocal stem** (drop it in, click **Analyze Vocal**, then edit the
 notes) or from a **MIDI file** (Import MIDI). Everything, including the notes themselves, is saved in the Logic project.
 
-> **Status (v0.1.0).** Core DSP, analyzer, MIDI, transport and state logic are unit-tested on Linux. The Linux
+> **Status (v0.2.0-dev).** Core DSP, analyzer, MIDI, transport and state logic are unit-tested on Linux. The Linux
 > Standalone builds. A macOS CI workflow ([`.github/workflows/macos-au.yml`](.github/workflows/macos-au.yml), see
 > [`ci/README.md`](ci/README.md)) builds the universal AU on `macos-14` and runs `auval`. The AU has **not yet been tried
 > inside Logic Pro**: see [`docs/MAC_VALIDATION.md`](docs/MAC_VALIDATION.md).
@@ -82,33 +88,50 @@ In Logic the plug-in is under **Audio FX > Audio Units > Pak209 > Pitch Lane**.
 
 ## Using it
 
+**Header.**
+
 | Control | What it does |
 |---|---|
-| **Key / Scale** | Highlights in-scale rows (the root row is brighter). Visual only: the reference notes are the actual target. |
-| **Low / High** | Visible vocal range of the roll. |
-| **Tolerance ±** | Cents counted as "in tune" (default ±10). |
-| **Tempo** | Manual BPM. Only used when the host provides none (for example the Standalone app). |
-| **Names** | `Middle C = C4` (A4 = 440 Hz, scientific) or `Middle C = C3` (Logic's default display). |
-| **Calibration (ms)** | Shifts your live line in time if it looks consistently early or late versus the targets (monitoring latency). |
-| **Ref offset (ms)** | Moves the reference notes relative to the song (align an imported melody). |
-| **Transpose (st)** | Transposes all reference notes (for example to sing a song in a different key). |
-| **Gate / Clarity** | Raise these if breaths, noise or bleed show a pitch. Lower them if quiet singing is missed. |
-| **View / Follow** | Seconds visible. Follow keeps the playhead in view (re-engages when playback starts). |
+| **Reference:** field / folder | Choose the isolated lead-vocal stem (or drag an audio / MIDI file onto the window). Orange "(missing)" = the file moved; the notes are saved in the project and still work. |
+| **ANALYZE VOCAL** | Turns the stem into editable reference notes in the background. While it runs the button shows **CANCEL nn%**. |
+| **Key** | Key and scale (e.g. "A minor"): used by the *Scales* guide and the row shading. |
+| **BPM** | Shows Logic's tempo while *Logic Sync* is on. With sync off (or no host tempo) it is the manual tempo: drag, scroll, pick from the menu or double-click to type. |
+| **LOGIC SYNC** | On (default): follow Logic's transport, position and tempo. Off: ignore the host and run a free clock at the manual BPM. |
+| Status dot | Green = synced to the host transport (brighter while playing), amber = sync on but the host sends no timeline, grey = sync off. |
+| ⚙ Settings | Note names (Middle C = C4 / C3 as in Logic), timing calibration, input gate, clarity, visible time, follow playhead, Import / Export MIDI, Undo / Redo, Select all, edit buttons for the selection (Delete, ±1 st, ±10 ms), Clear notes, section markers, Clear trace, Restart clock. |
 
-**Reference melody.**
-- **Load Vocal…** (or drag an audio file onto the window: wav/aiff/flac/ogg/mp3, and m4a/aac/caf on macOS), then **Analyze Vocal**.
-  Analysis runs in the background with a progress bar and **Cancel**.
-- **Import MIDI…** (or drag a `.mid`). If the file has several tracks, you pick the lead track. **Export MIDI…** saves the
-  notes with offset/transpose applied.
-- **Editing.** Click a bar to select it (Shift/⌘ adds). Drag in empty space for a rubber-band selection. Drag a bar to move it in time and pitch,
-  drag its right edge to change its length, double-click empty space to add a note. Buttons: **Delete**, **+1 st / −1 st**,
-  **<< 10ms / 10ms >>**, **Undo / Redo**, **Clear Notes**. Keys (if Logic passes them through): Delete/Backspace,
-  ↑/↓ (Shift = octave), ←/→ (Shift = 100 ms), ⌘A, ⌘Z / ⇧⌘Z, Esc. Mouse wheel pans (when not following),
-  ⌘/Ctrl + wheel zooms, Alt-drag pans.
-- Notes are stored **inside the Logic project**. If the original vocal file moves, you'll see
-  "Source file missing" but the notes keep working.
+**Bottom bar** (each title has an ⓘ tooltip): **Reference offset** (ms, moves the reference notes against the song; arrows
+10 ms, Shift 1 ms), **Transpose** (st), **Vocal range** (voice-type presets or lowest / highest note), **Tolerance** (±cents),
+**Guide** (*Notes* = compare with the reference melody, *Scales* = compare with the nearest note of the key / scale),
+**Display** (*Both* / *Vocal* line only / *Reference* notes only), **Smoothing** (0–100 %, how much the live line is
+smoothed; 60 % is the original tuning, 0 % is the raw detector output). Every value field also takes vertical drag, the
+mouse wheel and double-click-to-type.
 
-Colours: **green** = in tune, **blue** = flat, **orange** = sharp, **white** = no target note at that moment.
+**Roll.** Bar numbers along the top (from the host tempo and time signature), the section-marker lane, the keyboard
+(the target note is marked lavender, the sung note tinted), reference notes as lavender bars, and your live line in
+cyan. Where you are outside the tolerance on a note, the line and that part of the note turn orange-red (the first
+100 ms of each note are not judged, so scoops into a note aren't flagged). The loop region is shaded when Logic's
+Cycle is on. The view follows the playhead and zooms vertically to the current phrase inside the vocal range.
+
+**Editing** (as labelled in the hint bar under the roll):
+- **Drag** a note to move it in time and pitch (all selected notes move together).
+- **Option-drag** to create a note (Option-click creates a one-beat note).
+- **Shift-drag** a note to stretch it (dragging a note's right edge does the same).
+- **Double-click** a note to delete it.
+- Click selects, ⌘-click adds/removes, drag in empty space rubber-band selects (Shift/⌘ adds). When notes are selected,
+  the hint bar shows **−1 st / +1 st / ◀ 10 ms / 10 ms ▶ / Delete** buttons (Logic may swallow keys).
+- **Scroll ← →** buttons or the mouse wheel scroll time, **⌘ + scroll** zooms, Shift + vertical scroll moves the pitch
+  window, dragging the bar ruler (or middle-drag) pans.
+- Keys, if Logic passes them through: Delete/Backspace, ↑/↓ (Shift = octave), ←/→ (Shift = 100 ms), ⌘A, ⌘Z / ⇧⌘Z, Esc.
+
+**Section markers.** An Audio Unit can't read Logic's arrangement markers, so Pitch Lane has its own: double-click the
+lane under the bar numbers to add one (or Settings > *Add at playhead*), type its name, drag it to move it, double-click
+to rename, right-click for Rename / Delete. They are lettered A, B, C... in song order and saved in the project. There
+are no built-in sections.
+
+Notes, markers and settings are stored **inside the Logic project**.
+
+Colours: **cyan** = in tune (or no target at that moment), **orange-red** = outside the tolerance, **lavender** = reference notes.
 
 ---
 
@@ -117,21 +140,22 @@ Colours: **green** = in tune, **blue** = flat, **orange** = sharp, **white** = n
 1. Open a Logic project with a vocal track. On the track's **Audio FX** slot choose **Audio Units > Pak209 > Pitch Lane**.
    The sound must be exactly the same as without it.
 2. Record-enable the track with input monitoring on (or play back a recorded vocal). **Sing an A** (the A above middle C,
-   A4) and hold it: the readout should say **A4, ≈ 440 Hz, close to 0 cents**. (Set
-   *Names* to "Middle C = C3" if you prefer Logic's naming. It will then read A3.)
-3. **Import MIDI…** and choose a MIDI file of the melody (in Logic: select the melody region > File > Export >
+   A4) and hold it: LIVE NOTE should say **A4, close to 0 cents** once a reference note is under the playhead (without
+   one it shows the nearest note). (Set *Note names* to "Middle C = C3" in ⚙ Settings if you prefer Logic's naming. It will then read A3.)
+3. ⚙ Settings > **Import MIDI…** and choose a MIDI file of the melody (in Logic: select the melody region > File > Export >
    Selection as MIDI File). Bars appear on the roll.
 4. **Play** from the start, then **seek** to the middle, then turn on **Cycle** over 2 bars. The target bars should
    stay locked to Logic's playhead, and each loop pass redraws your line. If the bars are offset from the song, adjust
-   **Ref offset**.
-5. Sing along: while holding a target note the readout says FLAT / IN TUNE / SHARP with cents, and your line turns
-   green when in tune.
-6. **Load Vocal…** an isolated lead-vocal stem, click **Analyze Vocal** (watch the progress bar; try **Cancel** once
-   and then run it again). Notes appear as bars.
-7. Find a **bad note** (for example a short blip from reverb or a harmony), click it, press **Delete** (button). Drag another
-   note slightly, then **Undo**.
-8. **Save** the project, close it, reopen it: the notes and settings are still there. Optionally rename the stem file
-   and reopen to see the "Source file missing" message (the notes still work).
+   **Reference offset**. The status dot should be green, the BPM should show Logic's tempo and the bar numbers should match Logic's.
+5. Sing along: the cents readout and meter follow you, your line is cyan when in tune and orange-red (on the note too)
+   when outside the tolerance.
+6. Click the **Reference** field, pick an isolated lead-vocal stem, click **ANALYZE VOCAL** (it shows CANCEL nn%; try
+   cancelling once and then run it again). Notes appear as bars.
+7. Find a **bad note** (for example a short blip from reverb or a harmony) and double-click it to delete it. Option-drag
+   to draw a note, Shift-drag to stretch one, drag another slightly, then ⚙ > **Undo**.
+   Double-click the lane under the bar numbers to add a section marker and name it.
+8. **Save** the project, close it, reopen it: the notes, section markers and settings are still there. Optionally rename
+   the stem file and reopen: the Reference field shows the name in orange with "(missing)" (the notes still work).
 
 Report back: macOS version, Logic version, Apple Silicon or Intel, and anything in `docs/MAC_VALIDATION.md` that
 didn't behave.
@@ -146,6 +170,9 @@ cmake -S . -B build-core -G Ninja -DPITCHLANE_BUILD_PLUGIN=OFF && cmake --build 
 # Everything (Linux needs: libasound2-dev libfreetype-dev libfontconfig1-dev libx11-dev libxrandr-dev
 #   libxinerama-dev libxcursor-dev libxcomposite-dev libxext-dev libgl1-mesa-dev):
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build && ctest --test-dir build
+# Headless UI screenshot with test data (synthetic melody + synthesised voice):
+cmake --build build --target PitchLaneSnapshot
+xvfb-run -a build/plugin/PitchLaneSnapshot_artefacts/Release/PitchLaneSnapshot ui.png [width height]
 ```
 
 Docs: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · [`docs/MAC_VALIDATION.md`](docs/MAC_VALIDATION.md) ·

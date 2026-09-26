@@ -18,8 +18,13 @@ pitchlane/
 ├── plugin/                  JUCE 8 plugin (AU + Standalone; VST3 behind PITCHLANE_VST3)
 │   ├── src/
 │   │   ├── PluginProcessor     pass-through AU effect; detector + transport on the audio thread
-│   │   ├── PluginEditor        controls, readout, file workflows (Load Vocal / Analyze / MIDI import-export)
-│   │   ├── PianoRoll           scrolling roll, keyboard, target bars, trace, mouse/keyboard editing
+│   │   ├── PluginEditor        header / bottom bar / hint bar layout, file workflows (Load Vocal / Analyze / MIDI)
+│   │   ├── PianoRoll           bar ruler, section-marker lane, keyboard, reference bars, trace, playhead, editing
+│   │   ├── LiveNotePanel       LIVE NOTE readout, cents meter, confidence bar
+│   │   ├── SettingsPanel       gear popover: secondary settings + every edit command
+│   │   ├── Widgets / Theme     styled controls, LookAndFeel, embedded Inter font, icons
+│   │   ├── UiModel             pure UI logic (gesture mapping, bar maths, pitch window, labels), unit-tested
+│   │   ├── Markers             user section markers (saved in the plugin state)
 │   │   ├── ReferenceModel      notes + selection + undo (message thread, lock-protected)
 │   │   ├── AnalysisManager     background thread: decode audio file -> OfflineAnalyzer -> notes
 │   │   ├── StateCodec          ValueTree/XML state (parameters + embedded notes + source path)

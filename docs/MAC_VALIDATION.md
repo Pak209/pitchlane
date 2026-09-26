@@ -59,5 +59,14 @@ universal binary and passes `auval`. It says nothing about Logic's UI, transport
 - [ ] Duplicate the track / copy the plugin to another track: its state is copied.
 
 ## 7. UI
-- [ ] Resize the window. Check Retina rendering, and that the 60 Hz repaint doesn't load the CPU noticeably with a long song.
+- [ ] Resize the window (default 1240×720, minimum 1040×620). Check Retina rendering, the Inter font, and that the 60 Hz
+      repaint doesn't load the CPU noticeably with a long song.
+- [ ] Header: status dot green while Logic plays, BPM shows Logic's tempo, turning **LOGIC SYNC** off switches to the
+      free clock (grey dot, BPM editable), turning it back on re-locks to Logic.
+- [ ] Bar numbers match Logic's bars (constant tempo, including a 3/4 or 6/8 project).
+- [ ] Hint-bar gestures inside Logic: drag, Option-drag (create), Shift-drag (stretch), double-click (delete),
+      ⌘ + scroll (zoom), Scroll ← → buttons. Note whether Logic intercepts Option/Shift/⌘ with the plugin window focused.
+- [ ] Settings popover (gear) opens inside the plugin window; all commands work; tooltips (ⓘ) appear.
+- [ ] Section markers: add (double-click lane), rename, drag, right-click delete; saved with the project.
+- [ ] Smoothing knob visibly changes how calm the live line is (0 % = raw).
 - [ ] Close and reopen the plugin window during playback. The trace continues (up to about 40 s is kept while the window is closed).

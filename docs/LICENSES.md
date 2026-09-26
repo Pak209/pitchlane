@@ -25,6 +25,15 @@ Pitch Lane is released under the **GNU AGPL v3.0** (`LICENSE` in the repo root).
   `PITCHLANE_VST3=ON`). The JUCE MP3 *decoder* (`JUCE_USE_MP3AUDIOFORMAT=1`) is part of JUCE. MP3 patents have expired.
   We do not use ASIO or AAX.
 
+## Inter font (shipped, embedded in the plugin binary)
+
+- The UI uses **Inter** 4.1 by Rasmus Andersson / The Inter Project Authors (<https://github.com/rsms/inter>),
+  weights Regular, Medium and SemiBold, embedded via JUCE BinaryData (`plugin/resources/fonts/`).
+- Licence: **SIL Open Font License 1.1** (full text in `plugin/resources/fonts/OFL.txt`). The OFL allows embedding the
+  font in software and redistributing it, including in AGPL software, as long as the font itself isn't sold on its own
+  and the licence/copyright notice travels with it (done: `OFL.txt` is in the repo and this note documents it).
+  The fonts are unmodified, so the "Reserved Font Name" clause doesn't apply.
+
 ## Pitch Lane's own analyzer (shipped)
 
 - Native C++ YIN / pYIN-style monophonic transcription (`core/src/OfflineAnalyzer.cpp`). It is written from the published
