@@ -12,6 +12,7 @@ name: Release (signed + notarized pkg)
 on:
   push:
     tags: ['v*']
+    branches: [feat/m1-m4-core]   # TEMPORARY: verification runs before this file is on main; remove
   workflow_dispatch:
     inputs:
       dry_run:
@@ -29,6 +30,9 @@ concurrency:
 
 permissions:
   contents: read
+
+env:
+  TEMP_PUSH_MODE: dry   # TEMPORARY: mode for branch pushes (dry or sign only, never release); remove
 
 defaults:
   run:
@@ -65,6 +69,8 @@ jobs:
             elif $is_tag; then mode=release
             else echo "::error::A real release needs a v* tag. Push a tag (git tag v$proj && git push origin v$proj), run on a tag ref, or use dry_run / sign_only."; exit 1
             fi
+          elif [ "$EVENT" = "push" ] && [ "$REF" = "refs/heads/feat/m1-m4-core" ] && [[ "$TEMP_PUSH_MODE" =~ ^(dry|sign)$ ]]; then
+            mode="$TEMP_PUSH_MODE"   # TEMPORARY verification path; remove with the branch trigger
           else echo "::error::Unexpected trigger $EVENT $REF"; exit 1
           fi
           if [ "$mode" = "release" ]; then
