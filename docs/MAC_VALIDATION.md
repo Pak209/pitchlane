@@ -1,7 +1,13 @@
 # What still has to be validated on a real Mac with Logic Pro
 
-Everything below was **not** verifiable on the Linux build machine. CI (if it ran; see the PR) only proves that the
-AU compiles as a universal binary and passes `auval`. It says nothing about Logic's UI, transport or project saving.
+Everything below was **not** verifiable on the Linux build machine. The macOS CI workflow (`ci/macos-au.yml`) is
+not active yet because of the missing `workflow` token scope (see `ci/README.md`), so **the AU target has not been compiled on
+macOS at all yet**. Step 0 is to enable CI or build locally. Even a green CI run only proves that the AU compiles as a
+universal binary and passes `auval`. It says nothing about Logic's UI, transport or project saving.
+
+## 0. First macOS build
+- [ ] Enable CI (`gh auth refresh -s workflow`, move `ci/macos-au.yml` to `.github/workflows/`) **or** build locally
+      with the commands in the README. Fix any macOS-only compile errors (the shared code already builds with GCC 14 on Linux).
 
 ## 1. Install and scan
 - [ ] Install `PitchLane.component` into `~/Library/Audio/Plug-Ins/Components/` (built locally or unzipped from the CI artifact).

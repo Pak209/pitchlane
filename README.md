@@ -14,8 +14,9 @@ The reference melody can come from an **isolated lead-vocal stem** (drop it in, 
 notes) or from a **MIDI file** (Import MIDI). Everything, including the notes themselves, is saved in the Logic project.
 
 > **Status (v0.1.0).** Core DSP, analyzer, MIDI, transport and state logic are unit-tested on Linux. The Linux
-> Standalone builds. The macOS AU is built and `auval`-validated by CI (see the PR / Actions tab). It has **not yet
-> been tried inside Logic Pro**: see [`docs/MAC_VALIDATION.md`](docs/MAC_VALIDATION.md).
+> Standalone builds. A macOS CI workflow (universal AU build + `auval`) is ready in [`ci/macos-au.yml`](ci/README.md)
+> but **not active yet** (it needs a one-time `gh auth refresh -s workflow`). So the AU has **not yet been compiled on
+> macOS or tried inside Logic Pro**: see [`docs/MAC_VALIDATION.md`](docs/MAC_VALIDATION.md).
 
 ---
 
@@ -50,7 +51,7 @@ killall -9 AudioComponentRegistrar 2>/dev/null || true                          
 auval -v aufx Plne Pk20                                                                    # should end in "AU VALIDATION SUCCEEDED"
 ```
 
-**Using the CI build instead** (Actions > *macOS AU* > artifact `PitchLane-AU-macOS-universal`): unzip it, copy
+**Using the CI build instead** (once [`ci/macos-au.yml`](ci/README.md) is enabled: Actions > *macOS AU* > artifact `PitchLane-AU-macOS-universal`): unzip it, copy
 `PitchLane.component` to the path above, then remove the download quarantine and ad-hoc sign it (the build is
 unsigned):
 
