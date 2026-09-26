@@ -32,7 +32,7 @@ permissions:
   contents: read
 
 env:
-  TEMP_PUSH_MODE: dry   # TEMPORARY: mode for branch pushes (dry or sign only, never release); remove
+  TEMP_PUSH_MODE: sign  # TEMPORARY: mode for branch pushes (dry or sign only, never release); remove
 
 defaults:
   run:
@@ -154,11 +154,13 @@ jobs:
 
       - name: Signature gate self-test (must reject an ad-hoc bundle)
         if: steps.mode.outputs.mode == 'dry'
+        env:
+          PL_PLAIN_ERRORS: '1'
         run: |
           adhoc=~/Library/Audio/Plug-Ins/Components/PitchLane.component
           if ci/release/check_signature.sh pre "$adhoc"; then echo "::error::pre gate accepted an ad-hoc sealed bundle"; exit 1; fi
           if ci/release/check_signature.sh post "$adhoc" ABCDE12345; then echo "::error::post gate accepted an ad-hoc bundle"; exit 1; fi
-          echo "Self-test OK: both gates reject the ad-hoc copy (the ::error lines above are expected)."
+          echo "Self-test OK: both gates reject the ad-hoc copy."
 
       - name: Stage component
         run: |
