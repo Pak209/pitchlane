@@ -43,6 +43,12 @@ jobs:
       - name: Unit tests
         run: ctest --test-dir build --output-on-failure
 
+      - name: Confirm macOS-only format tests ran (M4A/AAC, ALAC, CAF via afconvert)
+        run: |
+          log=build/Testing/Temporary/LastTest.log
+          grep -E "Formats|tests passed" "$log"
+          grep -q "\[  OK  \] Formats (macOS): M4A/AAC" "$log" || { echo "::error::macOS format test did not run or failed"; exit 1; }
+
       - name: Inspect bundle
         run: |
           ls -la "$COMPONENT/Contents/MacOS"
