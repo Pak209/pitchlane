@@ -19,3 +19,15 @@ xcuserdata/
 *.component
 *.vst3
 *.zip
+
+# Never commit audio test material (private recordings, decoded stems).
+*.wav
+*.m4a
+*.aac
+*.mp3
+*.aif
+*.aiff
+*.flac
+*.caf
+!plugin/tests/fixtures/*.mp3
+pitchlane-testdata/

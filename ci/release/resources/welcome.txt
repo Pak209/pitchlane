@@ -1,0 +1,7 @@
+Pitch Lane: a real-time singing coach for Logic Pro.
+
+This installs the Pitch Lane Audio Unit for all users of this Mac, into
+/Library/Audio/Plug-Ins/Components. macOS will ask for your password.
+
+After installing, quit and reopen Logic Pro, then insert it on your vocal
+track from Audio FX > Pak209 > Pitch Lane.

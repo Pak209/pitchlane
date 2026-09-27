@@ -1,0 +1,1405 @@
+// Plugin-level tests (headless, Linux/macOS): pass-through bit-exactness, state round
+// trip, bus layouts, live frames through the real processor, background analysis.
+
+#include <juce_audio_processors/juce_audio_processors.h>
+
+#include <random>
+
+#include "../../core/tests/TestFramework.h"
+#include "../../core/tests/TestSignals.h"
+#include "AnalysisManager.h"
+#include "Params.h"
+#include "PluginProcessor.h"
+#include "StateCodec.h"
+#include "Markers.h"
+#include "PluginEditor.h"
+#include "UiModel.h"
+#include "pitchlane/NoteMath.h"
+#include "pitchlane/TakeScorer.h"
+#include "ReferenceModel.h"
+
+using namespace pitchlane;
+
+namespace {
+
+struct FakePlayHead : juce::AudioPlayHead
+{
+    juce::Optional<PositionInfo> getPosition() const override
+    {
+        if (!valid) return {};
+        PositionInfo p;
+        p.setTimeInSeconds(time);
+        const double ppq = ppqAtChange + (time - changeTime) * bpm / 60.0;
+        p.setPpqPosition(ppq);
+        p.setBpm(bpm);
+        if (num > 0)
+        {
+            p.setTimeSignature(TimeSignature { num, den });
+            const double barLen = num * 4.0 / den;
+            p.setPpqPositionOfLastBarStart(barAnchor + std::floor((ppq - barAnchor) / barLen + 1e-9) * barLen);
+        }
+        p.setIsPlaying(playing);
+        p.setIsRecording(recording);
+        p.setIsLooping(looping);
+        if (looping) p.setLoopPoints(LoopPoints { 0.0, 8.0 });
+        return p;
+    }
+    bool valid = true, playing = true, recording = false, looping = false;
+    double time = 0.0, bpm = 120.0;
+    double changeTime = 0.0, ppqAtChange = 0.0;   // last tempo change (ppq stays continuous)
+    int num = 0, den = 4;                         // 0 = no time signature / bar info
+    double barAnchor = 0.0;                       // a bar line (ppq) of the current signature
+    void setTempo(double newBpm)
+    {
+        ppqAtChange += (time - changeTime) * bpm / 60.0;
+        changeTime = time;
+        bpm = newBpm;
+    }
+};
+
+void fillRandom(juce::AudioBuffer<float>& b, uint32_t seed)
+{
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<float> d(-1.f, 1.f);
+    for (int ch = 0; ch < b.getNumChannels(); ++ch)
+        for (int i = 0; i < b.getNumSamples(); ++i) b.setSample(ch, i, d(rng));
+    // A few special values that a careless gain stage or denormal flush would change.
+    b.setSample(0, 0, 1.0e-39f);   // denormal
+    b.setSample(0, 1, -0.0f);
+    b.setSample(0, 2, 1.0f);
+    b.setSample(0, 3, -1.0f);
+    if (b.getNumSamples() > 4) b.setSample(0, 4, 3.4e38f);
+}
+
+bool bitIdentical(const juce::AudioBuffer<float>& a, const juce::AudioBuffer<float>& b)
+{
+    if (a.getNumChannels() != b.getNumChannels() || a.getNumSamples() != b.getNumSamples()) return false;
+    for (int ch = 0; ch < a.getNumChannels(); ++ch)
+        if (std::memcmp(a.getReadPointer(ch), b.getReadPointer(ch), sizeof(float) * static_cast<size_t>(a.getNumSamples())) != 0)
+            return false;
+    return true;
+}
+
+void runPassThrough(int channels)
+{
+    PitchLaneProcessor proc;
+    const auto set = channels == 1 ? juce::AudioChannelSet::mono() : juce::AudioChannelSet::stereo();
+    juce::AudioProcessor::BusesLayout layout;
+    layout.inputBuses.add(set);
+    layout.outputBuses.add(set);
+    CHECK(proc.setBusesLayout(layout));
+    CHECK_EQ(proc.getTotalNumInputChannels(), channels);
+    CHECK_EQ(proc.getTotalNumOutputChannels(), channels);
+
+    FakePlayHead ph;
+    proc.setPlayHead(&ph);
+    proc.prepareToPlay(48000.0, 512);
+    CHECK_EQ(proc.getLatencySamples(), 0);
+
+    juce::MidiBuffer midi;
+    uint32_t seed = 1;
+    bool allSame = true;
+    // Include block sizes larger than announced, odd sizes, 1-sample blocks, and a musical
+    // signal (so the detector is actually busy) as well as random noise.
+    for (int blockSize : { 512, 1, 17, 256, 1024, 4096, 480 })
+    {
+        for (int rep = 0; rep < 20; ++rep)
+        {
+            juce::AudioBuffer<float> buf(channels, blockSize);
+            if (rep % 2 == 0)
+            {
+                fillRandom(buf, seed++);
+            }
+            else
+            {
+                const auto tone = testsig::steady(48000.0, blockSize / 48000.0 + 0.001, 69, 6, 0.5);
+                for (int ch = 0; ch < channels; ++ch)
+                    for (int i = 0; i < blockSize; ++i) buf.setSample(ch, i, tone[static_cast<size_t>(i)] * (ch + 1) * 0.5f);
+            }
+            juce::AudioBuffer<float> original;
+            original.makeCopyOf(buf);
+            proc.processBlock(buf, midi);
+            ph.time += blockSize / 48000.0;
+            if (!bitIdentical(buf, original)) allSame = false;
+        }
+    }
+    CHECK(allSame);
+    CHECK(midi.isEmpty());
+    proc.setPlayHead(nullptr);
+}
+
+} // namespace
+
+TEST_CASE("Plugin: processBlock is bit-identical pass-through (mono)") { runPassThrough(1); }
+TEST_CASE("Plugin: processBlock is bit-identical pass-through (stereo)") { runPassThrough(2); }
+
+TEST_CASE("Plugin: bus layouts mono->mono and stereo->stereo only")
+{
+    PitchLaneProcessor proc;
+    auto layout = [](juce::AudioChannelSet in, juce::AudioChannelSet out) {
+        juce::AudioProcessor::BusesLayout l;
+        l.inputBuses.add(in);
+        l.outputBuses.add(out);
+        return l;
+    };
+    CHECK(proc.checkBusesLayoutSupported(layout(juce::AudioChannelSet::mono(), juce::AudioChannelSet::mono())));
+    CHECK(proc.checkBusesLayoutSupported(layout(juce::AudioChannelSet::stereo(), juce::AudioChannelSet::stereo())));
+    CHECK(!proc.checkBusesLayoutSupported(layout(juce::AudioChannelSet::mono(), juce::AudioChannelSet::stereo())));
+    CHECK(!proc.checkBusesLayoutSupported(layout(juce::AudioChannelSet::create5point1(), juce::AudioChannelSet::create5point1())));
+    CHECK(!proc.acceptsMidi());
+    CHECK(!proc.producesMidi());
+    CHECK_EQ(proc.getTailLengthSeconds(), 0.0);
+}
+
+TEST_CASE("Plugin: state round trip (settings + embedded notes + source path)")
+{
+    PitchLaneProcessor a;
+    auto setParam = [](PitchLaneProcessor& p, const char* id, float value) {
+        auto* param = p.getApvts().getParameter(id);
+        param->setValueNotifyingHost(param->convertTo0to1(value));
+    };
+    setParam(a, params::tolerance, 17.f);
+    setParam(a, params::calibration, -42.f);
+    setParam(a, params::refOffset, 1234.f);
+    setParam(a, params::transpose, -3.f);
+    setParam(a, params::key, 9.f);
+    setParam(a, params::scale, 2.f);
+    setParam(a, params::lowNote, 45.f);
+    setParam(a, params::highNote, 84.f);
+    setParam(a, params::tempo, 93.5f);
+    setParam(a, params::gateDb, -61.f);
+    setParam(a, params::clarity, 0.8f);
+    setParam(a, params::noteNames, 1.f);
+
+    NoteList notes;
+    for (int i = 0; i < 300; ++i)
+        notes.push_back({ i * 0.3371 + 0.123456789, 0.25 + (i % 7) * 0.01, 50 + (i * 7) % 30, 0.5f + (i % 5) * 0.1f, 64 + i % 60 });
+    a.getReference().setNotes(notes, false);
+    a.getReference().setSourcePath("/Users/twin/Music/Stems/Lead Vocal (missing).wav");
+
+    juce::MemoryBlock blob;
+    a.getStateInformation(blob);
+    CHECK(blob.getSize() > 100);
+
+    PitchLaneProcessor b;
+    b.setStateInformation(blob.getData(), static_cast<int>(blob.getSize()));
+
+    auto val = [](PitchLaneProcessor& p, const char* id) { return p.getApvts().getRawParameterValue(id)->load(); };
+    for (auto* id : { params::tolerance, params::calibration, params::refOffset, params::transpose, params::key, params::scale,
+                      params::lowNote, params::highNote, params::tempo, params::gateDb, params::clarity, params::noteNames })
+        CHECK_NEAR(val(b, id), val(a, id), 1e-4);
+    CHECK_NEAR(val(b, params::refOffset), 1234.0, 1e-3);
+    CHECK_NEAR(val(b, params::transpose), -3.0, 1e-6);
+
+    const auto back = b.getReference().getNotes();
+    auto sorted = notes;
+    sortNotes(sorted);
+    CHECK_EQ(back.size(), sorted.size());
+    bool same = back.size() == sorted.size();
+    for (size_t i = 0; same && i < back.size(); ++i)
+        same = std::abs(back[i].start - sorted[i].start) < 1e-9 && std::abs(back[i].length - sorted[i].length) < 1e-9
+               && back[i].pitch == sorted[i].pitch && back[i].velocity == sorted[i].velocity
+               && std::abs(back[i].confidence - sorted[i].confidence) < 1e-6f;
+    CHECK(same);
+    CHECK_EQ(b.getReference().getSourcePath(), juce::String("/Users/twin/Music/Stems/Lead Vocal (missing).wav"));
+
+    // The source file doesn't exist, but the notes are fully usable (embedded).
+    CHECK(!juce::File(b.getReference().getSourcePath()).existsAsFile());
+    CHECK_EQ(b.getReference().size(), 300);
+
+    // Garbage state is ignored safely.
+    const char junk[] = "not a state";
+    b.setStateInformation(junk, sizeof(junk));
+    CHECK_EQ(b.getReference().size(), 300);
+}
+
+TEST_CASE("Plugin: live frames from the real processor (A4 = 440 Hz, song-time stamps, loop jump marker)")
+{
+    PitchLaneProcessor proc;
+    FakePlayHead ph;
+    ph.time = 10.0;
+    proc.setPlayHead(&ph);
+    proc.prepareToPlay(44100.0, 256);
+    const auto tone = testsig::steady(44100.0, 1.0, 69, 6, 0.4);
+    juce::MidiBuffer midi;
+    for (size_t pos = 0; pos + 256 <= tone.size(); pos += 256)
+    {
+        juce::AudioBuffer<float> buf(2, 256);
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < 256; ++i) buf.setSample(ch, i, tone[pos + static_cast<size_t>(i)]);
+        proc.processBlock(buf, midi);
+        ph.time += 256 / 44100.0;
+    }
+    LiveFrame f;
+    int jumps = 0, onTimeline = 0, near440 = 0;
+    double firstT = -1, lastT = -1;
+    while (proc.popFrame(f))
+    {
+        if (f.flags & LiveFrame::Jump) { ++jumps; continue; }
+        if ((f.flags & LiveFrame::Playing) && (f.flags & LiveFrame::Voiced))
+        {
+            ++onTimeline;
+            if (firstT < 0) firstT = f.songTime;
+            lastT = f.songTime;
+            if (std::abs(f.hz - 440.f) < 1.f && std::abs(centsFromNote(f.midi, 69)) < 3.0) ++near440;
+        }
+    }
+    INFO("frames on timeline: " << onTimeline << ", first " << firstT << " s, last " << lastT << " s");
+    CHECK_EQ(jumps, 1); // playback start
+    CHECK(onTimeline > 150);
+    CHECK(near440 >= onTimeline * 95 / 100);
+    CHECK(firstT >= 10.0 && firstT < 10.1);
+    CHECK(lastT > 10.9 && lastT <= 11.0);
+
+    // Seek backwards -> Jump marker at the new position.
+    ph.time = 2.0;
+    juce::AudioBuffer<float> buf(2, 256);
+    buf.clear();
+    proc.processBlock(buf, midi);
+    bool sawJump = false;
+    while (proc.popFrame(f))
+        if ((f.flags & LiveFrame::Jump) && std::abs(f.songTime - 2.0) < 1e-9) sawJump = true;
+    CHECK(sawJump);
+
+    // No playhead at all (e.g. some hosts / standalone) -> free-running clock, no crash.
+    proc.setPlayHead(nullptr);
+    proc.processBlock(buf, midi);
+    CHECK(proc.getTransport().source == static_cast<int>(TimeSource::FreeRunning));
+    CHECK(proc.getTransport().playing);
+}
+
+TEST_CASE("Plugin: background Analyze Vocal on a WAV file")
+{
+    const double sr = 44100.0;
+    const std::vector<testsig::MelodyNote> truth = { { 0.2, 0.4, 60 }, { 0.8, 0.4, 64 }, { 1.4, 0.6, 67 } };
+    const auto audio = testsig::melody(sr, 2.2, truth);
+    auto file = juce::File::createTempFile(".wav");
+    {
+        juce::WavAudioFormat wav;
+        std::unique_ptr<juce::OutputStream> os = file.createOutputStream();
+        CHECK(os != nullptr);
+        auto writer = wav.createWriterFor(os, juce::AudioFormatWriterOptions {}.withSampleRate(sr).withNumChannels(2).withBitsPerSample(24));
+        CHECK(writer != nullptr);
+        juce::AudioBuffer<float> b(2, static_cast<int>(audio.size()));
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < b.getNumSamples(); ++i) b.setSample(ch, i, audio[static_cast<size_t>(i)]);
+        writer->writeFromAudioSampleBuffer(b, 0, b.getNumSamples());
+    }
+
+    AnalysisManager am;
+    CHECK(am.canOpen(file));
+    CHECK(am.start(file));
+    for (int i = 0; i < 1000 && am.isRunning(); ++i) juce::Thread::sleep(10);
+    CHECK(!am.isRunning());
+    CHECK(am.getStatus() == AnalysisManager::Status::Finished);
+    INFO("status: " << am.getStatusText());
+    CHECK(am.getStatusText().startsWith("3 notes"));
+
+    // Missing file fails gracefully.
+    AnalysisManager am2;
+    CHECK(am2.start(juce::File("/nonexistent/vocal.wav")));
+    for (int i = 0; i < 500 && am2.isRunning(); ++i) juce::Thread::sleep(10);
+    CHECK(am2.getStatus() == AnalysisManager::Status::Failed);
+
+    // Cancel works.
+    const auto longAudio = testsig::steady(sr, 60.0, 62, 4);
+    auto longFile = juce::File::createTempFile(".wav");
+    {
+        juce::WavAudioFormat wav;
+        std::unique_ptr<juce::OutputStream> os = longFile.createOutputStream();
+        auto writer = wav.createWriterFor(os, juce::AudioFormatWriterOptions {}.withSampleRate(sr).withNumChannels(1).withBitsPerSample(16));
+        juce::AudioBuffer<float> b(1, static_cast<int>(longAudio.size()));
+        b.copyFrom(0, 0, longAudio.data(), b.getNumSamples());
+        writer->writeFromAudioSampleBuffer(b, 0, b.getNumSamples());
+    }
+    AnalysisManager am3;
+    CHECK(am3.start(longFile));
+    juce::Thread::sleep(30);
+    am3.cancel();
+    for (int i = 0; i < 1000 && am3.isRunning(); ++i) juce::Thread::sleep(10);
+    CHECK(am3.getStatus() == AnalysisManager::Status::Cancelled);
+
+    file.deleteFile();
+    longFile.deleteFile();
+}
+
+TEST_CASE("Plugin: reference model edits + undo")
+{
+    ReferenceModel m;
+    m.setNotes({ { 0.0, 0.5, 60 }, { 1.0, 0.5, 62 }, { 2.0, 0.5, 64 } }, false);
+    m.selectOnly(1);
+    m.deleteSelected();
+    CHECK_EQ(m.size(), 2);
+    m.selectAll();
+    m.nudgeSelected(2, 0.1);
+    auto n = m.getNotes();
+    CHECK_EQ(n[0].pitch, 62);
+    CHECK_NEAR(n[1].start, 2.1, 1e-12);
+    CHECK(m.undo());
+    CHECK(m.undo());
+    CHECK_EQ(m.size(), 3);
+    CHECK(m.redo());
+    CHECK_EQ(m.size(), 2);
+    m.selectInRange(1.5, 3.0, 0, 127, false);
+    CHECK_EQ(m.numSelected(), 1);
+}
+
+// ---- UI model (restyle) -------------------------------------------------------------------------
+
+TEST_CASE("UI: roll gesture mapping matches the hint bar")
+{
+    using ui::RollAction;
+    auto act = [](bool onNote, bool edge, bool alt, bool shift, bool cmd, bool middle = false, bool ruler = false) {
+        ui::PressInfo p;
+        p.onNote = onNote; p.nearRightEdge = edge; p.alt = alt; p.shift = shift; p.cmd = cmd;
+        p.middleButton = middle; p.onRuler = ruler;
+        return ui::actionForPress(p);
+    };
+    // "Drag to adjust reference notes"
+    CHECK(act(true, false, false, false, false) == RollAction::Move);
+    // "Option-drag to create" (on empty space or over a note)
+    CHECK(act(false, false, true, false, false) == RollAction::Create);
+    CHECK(act(true, false, true, false, false) == RollAction::Create);
+    // "Shift-drag to stretch" (and the right edge of a note)
+    CHECK(act(true, false, false, true, false) == RollAction::Stretch);
+    CHECK(act(true, true, false, false, false) == RollAction::Stretch);
+    // "Double-click to delete"
+    CHECK(ui::actionForDoubleClick(true) == ui::DoubleClickAction::DeleteNote);
+    CHECK(ui::actionForDoubleClick(false) == ui::DoubleClickAction::None);
+    // selection / navigation
+    CHECK(act(true, false, false, false, true) == RollAction::ToggleSelect);
+    CHECK(act(false, false, false, false, false) == RollAction::Rubber);
+    CHECK(act(false, false, false, true, false) == RollAction::RubberAdd);
+    CHECK(act(false, false, false, false, true) == RollAction::RubberAdd);
+    CHECK(act(true, false, true, true, true, true) == RollAction::Pan);   // middle button always pans
+    CHECK(act(false, false, false, false, false, false, true) == RollAction::Pan); // ruler drag pans
+
+    // Option-drag spans in either direction, never negative, minimum length.
+    auto s1 = ui::createdSpan(2.0, 3.5);
+    CHECK_NEAR(s1.start, 2.0, 1e-12);
+    CHECK_NEAR(s1.length, 1.5, 1e-12);
+    auto s2 = ui::createdSpan(2.0, 1.0);
+    CHECK_NEAR(s2.start, 1.0, 1e-12);
+    CHECK_NEAR(s2.length, 1.0, 1e-12);
+    auto s3 = ui::createdSpan(0.01, -0.5);
+    CHECK_NEAR(s3.start, 0.0, 1e-12);
+    CHECK(s3.length >= 0.05 - 1e-12);
+    // Scroll buttons and ⌘ + scroll zoom.
+    CHECK_NEAR(ui::scrollStep(8.0, 1), 2.0, 1e-12);
+    CHECK_NEAR(ui::scrollStep(8.0, -1), -2.0, 1e-12);
+    CHECK(ui::zoomedSpan(8.0, 1.f) < 8.0);
+    CHECK(ui::zoomedSpan(8.0, -1.f) > 8.0);
+    CHECK_NEAR(ui::zoomedSpan(2.0, 1.f), 2.0, 1e-12);   // clamped
+    CHECK_NEAR(ui::zoomedSpan(30.0, -1.f), 30.0, 1e-12);
+}
+
+TEST_CASE("UI: bar ruler maths, pitch window, labels")
+{
+    ui::TempoFollower f;
+    TransportSnapshot s;
+    s.bpm = 104.0;
+    CHECK(f.update(s));
+    CHECK(!f.update(s));                                   // unchanged -> no repaint
+    const auto& g = f.map();
+    CHECK_NEAR(g.secondsPerBeatAt(0.0), 60.0 / 104.0, 1e-12);
+    CHECK_NEAR(g.timeOfBar(2), 4 * 60.0 / 104.0, 1e-12);
+    CHECK_EQ(g.barBeatAt(0.0).bar, 1);
+    CHECK_EQ(g.barBeatAt(g.timeOfBar(15)).bar, 15);
+    CHECK_EQ(g.barBeatAt(g.timeOfBar(15) - 1e-6).bar, 14);
+    s.bpm = 120.0; s.timeSigNum = 6; s.timeSigDen = 8;
+    CHECK(f.update(s));
+    CHECK_NEAR(f.map().timeOfBar(2), 6 * 0.25, 1e-12);   // six eighth notes at 120 bpm
+
+    // Whole range fits -> shown entirely.
+    auto w = ui::fitPitchWindow(48, 72, 500.f, 15.f, 60.0);
+    CHECK_EQ(w.lo, 48);
+    CHECK_EQ(w.hi, 72);
+    // Too tall -> window around the centre, clamped to the range.
+    w = ui::fitPitchWindow(36, 84, 300.f, 15.f, 60.0);
+    CHECK_EQ(w.hi - w.lo + 1, 20);
+    CHECK(w.lo <= 60 && w.hi >= 60);
+    w = ui::fitPitchWindow(36, 84, 300.f, 15.f, 30.0);
+    CHECK_EQ(w.lo, 36);
+    w = ui::fitPitchWindow(36, 84, 300.f, 15.f, 200.0);
+    CHECK_EQ(w.hi, 84);
+    // Phrase zoom: a narrow phrase gets at least 12-13 rows.
+    CHECK_EQ(ui::rowsForPhrase(62, 71), 15);
+    CHECK_EQ(ui::rowsForPhrase(64, 65), 13);
+    w = ui::fitPitchWindow(48, 72, 500.f, 15.f, 66.5, ui::rowsForPhrase(62, 71));
+    CHECK_EQ(w.hi - w.lo + 1, 15);
+    CHECK(w.lo <= 62 && w.hi >= 71);
+
+    CHECK_EQ(ui::keyScaleText(9, ScaleType::NaturalMinor), juce::String("A minor"));
+    CHECK_EQ(ui::keyScaleText(0, ScaleType::Major), juce::String("C major"));
+    CHECK_EQ(ui::rangeText(48, 72, OctaveConvention::Scientific), juce::String(juce::CharPointer_UTF8("C3 \xe2\x80\x93 C5")));
+    CHECK_EQ(ui::rangeText(48, 72, OctaveConvention::Yamaha), juce::String(juce::CharPointer_UTF8("C2 \xe2\x80\x93 C4")));
+    CHECK_EQ(ui::signedMsText(42.0), juce::String("+42 ms"));
+    CHECK_EQ(ui::signedMsText(0.0), juce::String("0 ms"));
+    CHECK_EQ(ui::signedMsText(-8.0), juce::String(juce::CharPointer_UTF8("\xe2\x88\x92" "8 ms")));
+    CHECK_EQ(ui::semitoneText(0), juce::String("0 st"));
+    CHECK_EQ(ui::centsText(-18.2), juce::String(juce::CharPointer_UTF8("\xe2\x88\x92" "18 cents")));
+    CHECK_NEAR(ui::meterFraction(0.0), 0.5f, 1e-6);
+    CHECK_NEAR(ui::meterFraction(50.0), 1.f, 1e-6);
+    CHECK_NEAR(ui::meterFraction(-80.0), 0.f, 1e-6);
+    // Scales guide: nearest in-scale note (A minor has no G#, so 67.6 -> G, 68.4 -> A).
+    CHECK_EQ(ui::nearestScaleNote(67.6, 9, ScaleType::NaturalMinor), 67);
+    CHECK_EQ(ui::nearestScaleNote(68.4, 9, ScaleType::NaturalMinor), 69);
+    CHECK_EQ(ui::nearestScaleNote(60.8, 0, ScaleType::Major), 60);
+    CHECK_EQ(ui::nearestScaleNote(61.2, 0, ScaleType::Major), 62);
+}
+
+TEST_CASE("UI: section markers (user-editable, sorted, letters, persistence)")
+{
+    MarkerModel m;
+    CHECK_EQ(m.size(), 0);  // never any built-in / demo sections
+    const int c = m.add(40.0, "Chorus");
+    const int a = m.add(10.0, "Verse 1");
+    const int b = m.add(25.0, "  Pre-Chorus  ");
+    CHECK_EQ(c, 0);
+    CHECK_EQ(a, 0);
+    CHECK_EQ(b, 1);
+    auto ms = m.getMarkers();
+    CHECK_EQ(ms.size(), static_cast<size_t>(3));
+    CHECK_EQ(ms[0].name, juce::String("Verse 1"));
+    CHECK_EQ(ms[1].name, juce::String("Pre-Chorus"));   // trimmed
+    CHECK_EQ(ms[2].name, juce::String("Chorus"));
+    CHECK_EQ(MarkerModel::letterFor(0), juce::String("A"));
+    CHECK_EQ(MarkerModel::letterFor(2), juce::String("C"));
+    CHECK_EQ(MarkerModel::letterFor(25), juce::String("Z"));
+    CHECK_EQ(MarkerModel::letterFor(26), juce::String("AA"));
+    CHECK_EQ(MarkerModel::letterFor(27), juce::String("AB"));
+    CHECK_EQ(m.indexAt(5.0), -1);
+    CHECK_EQ(m.indexAt(10.0), 0);
+    CHECK_EQ(m.indexAt(30.0), 1);
+    CHECK_EQ(m.indexAt(99.0), 2);
+
+    CHECK(m.rename(2, "Chorus 1"));
+    CHECK(m.rename(1, "   "));                 // empty -> default "Section"
+    CHECK_EQ(m.getMarkers()[1].name, juce::String("Section"));
+    CHECK(!m.rename(7, "x"));
+    CHECK_EQ(m.move(0, 50.0), 2);               // moved past the others, re-sorted
+    CHECK_EQ(m.getMarkers()[2].name, juce::String("Verse 1"));
+    CHECK_EQ(m.move(2, -5.0), 0);               // clamped to 0
+    CHECK_NEAR(m.getMarkers()[0].time, 0.0, 1e-12);
+    CHECK(m.remove(1));
+    CHECK(!m.remove(5));
+    CHECK_EQ(m.size(), 2);
+
+    // Tree round trip.
+    MarkerModel m2;
+    m2.fromTree(m.toTree());
+    CHECK_EQ(m2.size(), 2);
+    CHECK_EQ(m2.getMarkers()[1].name, m.getMarkers()[1].name);
+    CHECK_NEAR(m2.getMarkers()[1].time, m.getMarkers()[1].time, 1e-12);
+
+    // Saved with the plugin state, together with the new UI parameters.
+    PitchLaneProcessor p1;
+    p1.getMarkers().add(12.5, "Verse 1");
+    p1.getMarkers().add(31.25, "Bridge");
+    auto setParam = [](PitchLaneProcessor& p, const char* id, float value) {
+        auto* prm = p.getApvts().getParameter(id);
+        prm->setValueNotifyingHost(prm->convertTo0to1(value));
+    };
+    setParam(p1, params::smoothing, 35.f);
+    setParam(p1, params::guide, 1.f);
+    setParam(p1, params::display, 2.f);
+    setParam(p1, params::hostSync, 0.f);
+    juce::MemoryBlock blob;
+    p1.getStateInformation(blob);
+    PitchLaneProcessor p2;
+    p2.setStateInformation(blob.getData(), static_cast<int>(blob.getSize()));
+    CHECK_EQ(p2.getMarkers().size(), 2);
+    CHECK_EQ(p2.getMarkers().getMarkers()[1].name, juce::String("Bridge"));
+    CHECK_NEAR(p2.getMarkers().getMarkers()[0].time, 12.5, 1e-12);
+    auto val = [](PitchLaneProcessor& p, const char* id) { return p.getApvts().getRawParameterValue(id)->load(); };
+    CHECK_NEAR(val(p2, params::smoothing), 35.f, 1e-4);
+    CHECK_NEAR(val(p2, params::guide), 1.f, 1e-6);
+    CHECK_NEAR(val(p2, params::display), 2.f, 1e-6);
+    CHECK_NEAR(val(p2, params::hostSync), 0.f, 1e-6);
+
+    // A v1 state (no markers) loads and clears markers.
+    PitchLaneProcessor p3;
+    p3.getMarkers().add(1.0, "stale");
+    auto tree = state::makeStateTree(p1.getApvts(), p1.getReference(), nullptr);
+    CHECK(!tree.getChildWithName(MarkerModel::treeType).isValid());
+    CHECK(state::applyStateTree(tree, p3.getApvts(), p3.getReference(), &p3.getMarkers()));
+    CHECK_EQ(p3.getMarkers().size(), 0);
+}
+
+TEST_CASE("Plugin: Logic Sync off + smoothing changes keep bit-identical pass-through and 0 latency")
+{
+    PitchLaneProcessor proc;
+    FakePlayHead ph;
+    ph.time = 5.0;
+    proc.setPlayHead(&ph);
+    proc.prepareToPlay(48000.0, 256);
+    CHECK_EQ(proc.getLatencySamples(), 0);
+    auto* sync = proc.getApvts().getParameter(params::hostSync);
+    auto* smooth = proc.getApvts().getParameter(params::smoothing);
+    juce::MidiBuffer midi;
+    bool same = true;
+    for (int i = 0; i < 200; ++i)
+    {
+        if (i == 50) sync->setValueNotifyingHost(0.f);
+        if (i % 20 == 0) smooth->setValueNotifyingHost(static_cast<float>((i / 20) % 5) / 4.f);
+        if (i == 150) sync->setValueNotifyingHost(1.f);
+        juce::AudioBuffer<float> buf(2, 256);
+        fillRandom(buf, static_cast<uint32_t>(100 + i));
+        if (i % 2 == 1)
+        {
+            const auto tone = testsig::steady(48000.0, 256 / 48000.0 + 0.001, 64, 6, 0.5);
+            for (int ch = 0; ch < 2; ++ch)
+                for (int k = 0; k < 256; ++k) buf.setSample(ch, k, tone[static_cast<size_t>(k)]);
+        }
+        juce::AudioBuffer<float> orig;
+        orig.makeCopyOf(buf);
+        proc.processBlock(buf, midi);
+        ph.time += 256 / 48000.0;
+        if (!bitIdentical(buf, orig)) same = false;
+        if (i == 100)
+        {
+            // Sync off: the host timeline is ignored, the free clock runs.
+            CHECK(proc.getTransport().source == static_cast<int>(TimeSource::FreeRunning));
+        }
+        if (i == 199)
+        {
+            CHECK(proc.getTransport().source != static_cast<int>(TimeSource::FreeRunning));
+            CHECK_EQ(proc.getTransport().timeSigNum, 4);
+        }
+    }
+    CHECK(same);
+    CHECK_EQ(proc.getLatencySamples(), 0);
+    proc.setPlayHead(nullptr);
+}
+
+TEST_CASE("UI: editor builds, lays out and paints at default and minimum size")
+{
+    PitchLaneProcessor proc;
+    proc.getReference().setNotes({ { 0.5, 0.5, 60 }, { 1.0, 0.5, 64 } }, false);
+    std::unique_ptr<juce::AudioProcessorEditor> ed(proc.createEditorAndMakeActive());
+    CHECK(ed != nullptr);
+    for (auto size : { juce::Point<int>(PitchLaneEditor::kDefaultW, PitchLaneEditor::kDefaultH),
+                       juce::Point<int>(PitchLaneEditor::kMinW, PitchLaneEditor::kMinH) })
+    {
+        ed->setSize(size.x, size.y);
+        bool inside = true, nonEmpty = true;
+        for (auto* c : ed->getChildren())
+        {
+            if (!c->isVisible() || dynamic_cast<juce::ResizableCornerComponent*>(c) != nullptr) continue;
+            if (!ed->getLocalBounds().contains(c->getBounds())) inside = false;
+            if (c->getWidth() < 12 || c->getHeight() < 12) nonEmpty = false;
+        }
+        CHECK(inside);
+        CHECK(nonEmpty);
+        const auto img = ed->createComponentSnapshot(ed->getLocalBounds(), true, 1.0f);
+        CHECK_EQ(img.getWidth(), size.x);
+    }
+    ed.reset();
+    proc.editorBeingDeleted(nullptr);
+}
+
+int main()
+{
+    juce::ScopedJuceInitialiser_GUI init;
+    return tf::runAll("PitchLaneTests");
+}
+
+TEST_CASE("Plugin: host tempo map (tempo + signature changes) and manual time signature")
+{
+    PitchLaneProcessor proc;
+    FakePlayHead ph;
+    ph.bpm = 90.0; ph.num = 3; ph.den = 4;
+    proc.setPlayHead(&ph);
+    proc.prepareToPlay(48000.0, 480);
+    juce::MidiBuffer midi;
+    ui::TempoFollower follower;
+    auto run = [&](double seconds) {
+        const int blocks = static_cast<int>(std::lround(seconds * 100.0));
+        for (int i = 0; i < blocks; ++i)
+        {
+            juce::AudioBuffer<float> buf(2, 480);
+            buf.clear();
+            proc.processBlock(buf, midi);
+            ph.time += 0.01;
+            follower.update(proc.getTransport());
+        }
+    };
+    run(1.0);
+    auto t = proc.getTransport();
+    CHECK(t.hasPpq);
+    CHECK(t.hasBarStart);
+    CHECK_EQ(t.timeSigNum, 3);
+    CHECK_EQ(t.timeSigDen, 4);
+    CHECK(follower.followingHost());
+    // 3/4 at 90 bpm: 2 s per bar.
+    CHECK_NEAR(follower.map().timeOfBar(3), 4.0, 1e-6);
+    // Tempo change to 120 at bar 3 (4.0 s): bars 3.. are 1.5 s long.
+    run(3.0);
+    ph.setTempo(120.0);
+    run(3.0);
+    CHECK_NEAR(follower.map().timeOfBar(2), 2.0, 1e-3);
+    CHECK_NEAR(follower.map().timeOfBar(4), 4.0 + 1.5, 1e-3);
+    CHECK_EQ(follower.map().barBeatAt(4.0 + 1.5 + 0.55).beat, 2);
+    // Signature change to 7/8 at bar 5 (5.5 + 1.5 = 7.0 s).
+    run(0.0);
+    const double ppqNow = ph.ppqAtChange + (ph.time - ph.changeTime) * ph.bpm / 60.0;
+    CHECK_NEAR(ppqNow, 6.0 + 6.0, 1e-6);                   // 6 quarters @90 + 6 @120 = bar 5
+    ph.num = 7; ph.den = 8; ph.barAnchor = ppqNow;
+    run(2.0);
+    CHECK_EQ(proc.getTransport().timeSigNum, 7);
+    CHECK_NEAR(follower.map().timeOfBar(5), 7.0, 1e-3);
+    CHECK_NEAR(follower.map().timeOfBar(6), 7.0 + 1.75, 1e-3);   // 7 eighths at 120 bpm
+    CHECK_NEAR(follower.map().timeOfBar(4), 5.5, 1e-3);          // earlier bars kept
+    CHECK_NEAR(follower.map().secondsPerBeatAt(8.0), 0.25, 1e-9);
+
+    // Logic Sync off: manual tempo + manual time signature (6/8), constant grid.
+    proc.getApvts().getParameter(params::hostSync)->setValueNotifyingHost(0.f);
+    auto* sig = proc.getApvts().getParameter(params::timeSig);
+    sig->setValueNotifyingHost(sig->convertTo0to1(4.f));   // 6/8
+    auto* tempo = proc.getApvts().getParameter(params::tempo);
+    tempo->setValueNotifyingHost(tempo->convertTo0to1(80.f));
+    run(0.5);
+    t = proc.getTransport();
+    CHECK(!t.hasPpq);
+    CHECK_EQ(t.timeSigNum, 6);
+    CHECK_EQ(t.timeSigDen, 8);
+    CHECK(!follower.followingHost());
+    CHECK_EQ(follower.map().segments().size(), size_t(1));
+    CHECK_NEAR(follower.map().timeOfBar(2), 6 * 0.375, 1e-6);   // 6 eighths at 80 bpm = 2.25 s
+    proc.setPlayHead(nullptr);
+}
+
+namespace {
+const std::vector<testsig::MelodyNote> kFormatMelody = { { 0.2, 0.4, 60 }, { 0.8, 0.4, 64 }, { 1.4, 0.6, 67 } };
+
+// Stereo: left = melody, right = melody at half level (mono mix = 0.75 x melody).
+bool writeStereo(juce::AudioFormat& fmt, const juce::File& f, double sr, int bits, const std::vector<float>& audio)
+{
+    f.deleteFile();
+    std::unique_ptr<juce::OutputStream> os = f.createOutputStream();
+    if (os == nullptr) return false;
+    auto writer = fmt.createWriterFor(os, juce::AudioFormatWriterOptions {}.withSampleRate(sr).withNumChannels(2).withBitsPerSample(bits));
+    if (writer == nullptr) return false;
+    juce::AudioBuffer<float> b(2, static_cast<int>(audio.size()));
+    for (int i = 0; i < b.getNumSamples(); ++i)
+    {
+        b.setSample(0, i, audio[static_cast<size_t>(i)]);
+        b.setSample(1, i, 0.5f * audio[static_cast<size_t>(i)]);
+    }
+    return writer->writeFromAudioSampleBuffer(b, 0, b.getNumSamples());
+}
+
+// Decodes, analyzes with the default settings and checks the three melody notes.
+void checkDecodesMelody(const juce::File& f, double expectedSr, double onsetTol, bool expectStereo)
+{
+    juce::AudioFormatManager fm;
+    fm.registerBasicFormats();
+    INFO(f.getFileName());
+    const auto d = decodeToMono(fm, f, 60.0);
+    INFO("error: " << d.error);
+    CHECK(d.ok());
+    if (!d.ok()) return;
+    CHECK_NEAR(d.sampleRate, expectedSr, 1e-6);
+    CHECK(std::abs(static_cast<double>(d.mono.size()) / d.sampleRate - 2.2) < 0.1);
+    if (expectStereo) CHECK_EQ(d.numChannels, 2);
+    const auto ar = analyzeMonophonic(d.mono.data(), d.mono.size(), d.sampleRate, {});
+    int matched = 0;
+    for (const auto& t : kFormatMelody)
+        for (const auto& n : ar.notes)
+            if (!n.muted() && n.pitch == t.midi && std::abs(n.start - t.start) < onsetTol) { ++matched; break; }
+    INFO("notes: " << ar.notes.size());
+    CHECK_EQ(matched, 3);
+}
+
+#if JUCE_MAC
+bool runTool(const juce::StringArray& args)
+{
+    juce::ChildProcess p;
+    if (!p.start(args)) return false;
+    if (!p.waitForProcessToFinish(60000)) { p.kill(); return false; }
+    return p.getExitCode() == 0;
+}
+#endif
+} // namespace
+
+TEST_CASE("Formats: WAV / AIFF / FLAC at several sample rates, stereo mixed to mono")
+{
+    for (const double sr : { 22050.0, 44100.0, 48000.0, 96000.0 })
+    {
+        const auto audio = testsig::melody(sr, 2.2, kFormatMelody);
+        juce::WavAudioFormat wav;
+        juce::AiffAudioFormat aiff;
+        juce::FlacAudioFormat flac;
+        struct F { juce::AudioFormat* fmt; const char* ext; int bits; };
+        for (const auto& f : { F { &wav, ".wav", 24 }, F { &wav, ".wav", 16 }, F { &aiff, ".aiff", 16 }, F { &flac, ".flac", 24 } })
+        {
+            if (sr > 48000.0 && f.fmt == &flac) continue;   // JUCE's FLAC writer: <= 48 kHz is enough here
+            auto file = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                            .getChildFile("pl-fmt-" + juce::String(static_cast<int>(sr)) + "-" + juce::String(f.bits) + f.ext);
+            CHECK(writeStereo(*f.fmt, file, sr, f.bits, audio));
+            checkDecodesMelody(file, sr, 0.05, true);
+            if (f.bits == 24 && f.fmt == &wav)
+            {
+                juce::AudioFormatManager fm;
+                fm.registerBasicFormats();
+                const auto d = decodeToMono(fm, file, 60.0);
+                double maxErr = 0.0;
+                for (size_t i = 0; i < d.mono.size() && i < audio.size(); ++i)
+                    maxErr = std::max(maxErr, std::abs(static_cast<double>(d.mono[i]) - 0.75 * audio[i]));
+                CHECK(maxErr < 1e-4);                      // channels averaged
+            }
+            file.deleteFile();
+        }
+    }
+}
+
+TEST_CASE("Formats: MP3 fixture (synthetic, committed)")
+{
+    const juce::File mp3(juce::String(PITCHLANE_TEST_FIXTURES) + "/melody-c-e-g.mp3");
+    CHECK(mp3.existsAsFile());
+    AnalysisManager am;
+    CHECK(am.canOpen(mp3));
+    checkDecodesMelody(mp3, 44100.0, 0.07, false);   // encoder delay ~25 ms
+}
+
+TEST_CASE("Formats: unsupported, missing and damaged files give clear errors")
+{
+    juce::AudioFormatManager fm;
+    fm.registerBasicFormats();
+    const auto tmp = juce::File::getSpecialLocation(juce::File::tempDirectory);
+
+    const auto missing = decodeToMono(fm, tmp.getChildFile("pl-does-not-exist.wav"), 60.0);
+    CHECK(missing.error.startsWith("File not found"));
+
+    auto odd = tmp.getChildFile("pl-notes.xyz");
+    odd.replaceWithText("not audio");
+    const auto unsupported = decodeToMono(fm, odd, 60.0);
+    INFO(unsupported.error);
+    CHECK(unsupported.error.startsWith("Unsupported file type"));
+    CHECK(unsupported.error.contains("WAV"));
+    odd.deleteFile();
+
+    for (const char* ext : { ".wav", ".aiff", ".flac", ".mp3" })
+    {
+        auto bad = tmp.getChildFile(juce::String("pl-damaged") + ext);
+        juce::MemoryBlock junk;
+        std::mt19937 rng(7);
+        for (int i = 0; i < 20000; ++i) { const auto c = static_cast<char>(rng() & 0xff); junk.append(&c, 1); }
+        bad.replaceWithData(junk.getData(), junk.getSize());
+        const auto d = decodeToMono(fm, bad, 60.0);
+        INFO(ext << ": " << d.error);
+        CHECK(!d.ok());
+        CHECK(d.error.contains("damaged") || d.error.contains("no audio"));
+        bad.deleteFile();
+    }
+
+#if ! JUCE_MAC
+    // Without Core Audio (Linux/Windows builds) AAC is not decodable: say so plainly.
+    auto m4a = tmp.getChildFile("pl-fake.m4a");
+    m4a.replaceWithText("x");
+    const auto aac = decodeToMono(fm, m4a, 60.0);
+    CHECK(aac.error.startsWith("Unsupported file type"));
+    m4a.deleteFile();
+#endif
+
+    // Through AnalysisManager the message reaches the status line.
+    auto bad = tmp.getChildFile("pl-damaged2.wav");
+    bad.replaceWithText("RIFF but not really a wave file at all");
+    AnalysisManager am;
+    CHECK(am.start(bad));
+    for (int i = 0; i < 500 && am.isRunning(); ++i) juce::Thread::sleep(10);
+    CHECK(am.getStatus() == AnalysisManager::Status::Failed);
+    CHECK(am.getStatusText().contains("damaged"));
+    bad.deleteFile();
+}
+
+TEST_CASE("Formats: long file is cancelled promptly while decoding and while analyzing")
+{
+    const double sr = 22050.0;
+    const auto tone = testsig::steady(sr, 30.0, 62, 4);
+    auto longFile = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("pl-long-16min.wav");
+    {
+        longFile.deleteFile();
+        juce::WavAudioFormat wav;
+        std::unique_ptr<juce::OutputStream> os = longFile.createOutputStream();
+        auto writer = wav.createWriterFor(os, juce::AudioFormatWriterOptions {}.withSampleRate(sr).withNumChannels(2).withBitsPerSample(16));
+        CHECK(writer != nullptr);
+        juce::AudioBuffer<float> b(2, static_cast<int>(tone.size()));
+        for (int ch = 0; ch < 2; ++ch) b.copyFrom(ch, 0, tone.data(), b.getNumSamples());
+        for (int k = 0; k < 32; ++k) writer->writeFromAudioSampleBuffer(b, 0, b.getNumSamples());   // 16 minutes
+    }
+    for (const bool duringAnalysis : { false, true })
+    {
+        AnalysisManager am;
+        CHECK(am.start(longFile));
+        const auto wanted = duringAnalysis ? AnalysisManager::Status::Analyzing : AnalysisManager::Status::Decoding;
+        for (int i = 0; i < 3000 && am.getStatus() != wanted; ++i) juce::Thread::sleep(1);
+        if (duringAnalysis) juce::Thread::sleep(50);
+        CHECK(am.getStatus() == wanted);
+        const auto t0 = juce::Time::getMillisecondCounterHiRes();
+        am.cancel();
+        for (int i = 0; i < 2000 && am.isRunning(); ++i) juce::Thread::sleep(1);
+        const double ms = juce::Time::getMillisecondCounterHiRes() - t0;
+        INFO((duringAnalysis ? "analyzing" : "decoding") << " cancel took " << ms << " ms");
+        CHECK(!am.isRunning());
+        CHECK(am.getStatus() == AnalysisManager::Status::Cancelled);
+        CHECK(ms < 500.0);
+    }
+    longFile.deleteFile();
+}
+
+#if JUCE_MAC
+TEST_CASE("Formats (macOS): M4A/AAC, M4A/ALAC, CAF and AIFF made with afconvert decode via Core Audio")
+{
+    // Synthetic audio only (never user recordings).
+    const auto tmp = juce::File::getSpecialLocation(juce::File::tempDirectory);
+    const auto src = tmp.getChildFile("pl-afconvert-src.wav");
+    const auto audio = testsig::melody(44100.0, 2.2, kFormatMelody);
+    juce::WavAudioFormat wav;
+    CHECK(writeStereo(wav, src, 44100.0, 16, audio));
+    struct Conv { const char* name; const char* file; const char* type; const char* data; double sr; };
+    const Conv convs[] = {
+        { "AAC in M4A", "pl-aac.m4a", "m4af", "aac", 44100.0 },
+        { "AAC in M4A @48k", "pl-aac48.m4a", "m4af", "aac@48000", 48000.0 },
+        { "ALAC in M4A", "pl-alac.m4a", "m4af", "alac", 44100.0 },
+        { "AAC in CAF", "pl-aac.caf", "caff", "aac", 44100.0 },
+        { "AIFF (afconvert)", "pl-afc.aiff", "AIFF", "BEI16", 44100.0 },
+    };
+    AnalysisManager am;
+    for (const auto& c : convs)
+    {
+        INFO(c.name);
+        const auto out = tmp.getChildFile(c.file);
+        out.deleteFile();
+        CHECK(runTool({ "/usr/bin/afconvert", "-f", c.type, "-d", c.data, src.getFullPathName(), out.getFullPathName() }));
+        CHECK(out.existsAsFile());
+        CHECK(am.canOpen(out));
+        checkDecodesMelody(out, c.sr, 0.07, true);   // AAC priming ~2112 samples is trimmed by Core Audio
+        out.deleteFile();
+    }
+    src.deleteFile();
+}
+#endif
+
+TEST_CASE("Formats: optional local files via PITCHLANE_EXTRA_AUDIO (not in CI)")
+{
+    // Developer hook for trying real recordings through the plugin's own loader without
+    // committing them: PITCHLANE_EXTRA_AUDIO=/path/a.m4a:/path/b.wav PitchLaneTests
+    const auto list = juce::SystemStats::getEnvironmentVariable("PITCHLANE_EXTRA_AUDIO", {});
+    if (list.isEmpty()) return;
+    juce::AudioFormatManager fm;
+    fm.registerBasicFormats();
+    for (const auto& path : juce::StringArray::fromTokens(list, ":", {}))
+    {
+        const juce::File f(path);
+        const auto t0 = juce::Time::getMillisecondCounterHiRes();
+        const auto d = decodeToMono(fm, f, AnalysisManager::kMaxSeconds);
+        const auto t1 = juce::Time::getMillisecondCounterHiRes();
+        if (!d.ok())
+        {
+            std::printf("    %s: %s\n", f.getFileName().toRawUTF8(), d.error.toRawUTF8());
+            CHECK(d.error.startsWith("Unsupported file type"));   // e.g. AAC off macOS
+            continue;
+        }
+        const auto ar = analyzeMonophonic(d.mono.data(), d.mono.size(), d.sampleRate, {});
+        const auto t2 = juce::Time::getMillisecondCounterHiRes();
+        int suspects = 0;
+        for (const auto& n : ar.notes) suspects += n.harmonySuspect() ? 1 : 0;
+        std::printf("    %s: %s, %.0f Hz, %d ch, %.2f s; decode %.0f ms, analyze %.0f ms; %d notes, %d harmony suspects\n",
+                    f.getFileName().toRawUTF8(), d.formatName.toRawUTF8(), d.sampleRate, d.numChannels,
+                    static_cast<double>(d.mono.size()) / d.sampleRate, t1 - t0, t2 - t1,
+                    static_cast<int>(ar.notes.size()), suspects);
+        CHECK(!ar.notes.empty());
+    }
+}
+
+TEST_CASE("Harmony: mute / unmute, harmonies toggle, remove muted (undoable), flags persist")
+{
+    ReferenceModel m;
+    NoteList n { { 0.0, 1.0, 72, 1.f, 100 }, { 0.0, 1.0, 69, 1.f, 70 }, { 1.0, 1.0, 74, 1.f, 100 }, { 1.0, 1.0, 71, 1.f, 70 } };
+    n = ui::notesForImport(n, ui::ImportVoices::AllHarmoniesMuted);
+    m.setNotes(n, false);
+    CHECK_EQ(m.numHarmonySuspects(), 2);
+    CHECK_EQ(m.numMuted(), 2);
+    CHECK(m.harmoniesMuted());
+    m.setHarmoniesMuted(false);
+    CHECK_EQ(m.numMuted(), 0);
+    CHECK(!m.harmoniesMuted());
+    CHECK(m.undo());
+    CHECK_EQ(m.numMuted(), 2);
+    // 'M' on a lead note mutes it; again unmutes.
+    int lead = -1;
+    const auto notes = m.getNotes();
+    for (int i = 0; i < static_cast<int>(notes.size()); ++i) if (notes[size_t(i)].pitch == 74) lead = i;
+    m.selectOnly(lead);
+    m.toggleSelectedMuted();
+    CHECK(m.getNotes()[size_t(lead)].muted());
+    CHECK_EQ(m.numMuted(), 3);
+    m.toggleSelectedMuted();
+    CHECK_EQ(m.numMuted(), 2);
+
+    // Flags survive the plugin state.
+    {
+        PitchLaneProcessor a;
+        a.getReference().setNotes(m.getNotes(), false);
+        juce::MemoryBlock state;
+        a.getStateInformation(state);
+        PitchLaneProcessor b;
+        b.setStateInformation(state.getData(), static_cast<int>(state.getSize()));
+        CHECK_EQ(b.getReference().numMuted(), 2);
+        CHECK_EQ(b.getReference().numHarmonySuspects(), 2);
+    }
+
+    m.removeMuted();
+    CHECK_EQ(m.size(), 2);
+    CHECK_EQ(m.numMuted(), 0);
+    CHECK(m.undo());
+    CHECK_EQ(m.size(), 4);
+
+    // Import choices.
+    const NoteList two { { 0.0, 1.0, 72, 1.f, 60 }, { 0.0, 1.0, 64, 1.f, 120 }, { 1.0, 1.0, 74, 1.f, 60 }, { 1.0, 1.0, 65, 1.f, 120 } };
+    const auto top = ui::notesForImport(two, ui::ImportVoices::LeadHighest);
+    CHECK_EQ(top.size(), size_t(2));
+    CHECK_EQ(top[0].pitch, 72);
+    const auto loud = ui::notesForImport(two, ui::ImportVoices::LeadLoudest);
+    CHECK_EQ(loud.size(), size_t(2));
+    CHECK_EQ(loud[0].pitch, 64);
+    CHECK_EQ(ui::notesForImport(two, ui::ImportVoices::All).size(), size_t(4));
+    CHECK_EQ(maxPolyphony(ui::notesForImport(two, ui::ImportVoices::All)), 2);
+}
+
+TEST_CASE("Feedback: live frames from the processor are scored on time / late against the reference")
+{
+    const NoteList ref { { 1.0, 0.45, 60, 1.f, 100 }, { 1.5, 0.45, 64, 1.f, 100 }, { 2.0, 0.45, 67, 1.f, 100 } };
+    for (const double shift : { 0.0, 0.15 })
+    {
+        PitchLaneProcessor proc;
+        FakePlayHead ph;
+        proc.setPlayHead(&ph);
+        const double sr = 48000.0;
+        proc.prepareToPlay(sr, 480);
+        std::vector<testsig::MelodyNote> sung;
+        for (const auto& n : ref) sung.push_back({ n.start + shift, n.length, n.pitch });
+        const auto audio = testsig::melody(sr, 3.2, sung);
+        TakeScorer scorer;
+        scorer.setReference(ref, {});
+        juce::MidiBuffer midi;
+        LiveFrame f;
+        for (size_t pos = 0; pos + 480 <= audio.size(); pos += 480)
+        {
+            juce::AudioBuffer<float> buf(2, 480);
+            for (int ch = 0; ch < 2; ++ch) buf.copyFrom(ch, 0, audio.data() + pos, 480);
+            proc.processBlock(buf, midi);
+            ph.time += 480 / sr;
+            while (proc.popFrame(f))
+                if ((f.flags & LiveFrame::Playing) && !(f.flags & LiveFrame::Jump))
+                    scorer.addFrame(f.songTime, (f.flags & LiveFrame::Voiced) ? (f.rawMidi > 0.f ? f.rawMidi : f.midi) : 0.f);
+        }
+        scorer.finishUpTo(10.0);
+        INFO("shift " << shift);
+        CHECK_EQ(scorer.scores().size(), size_t(3));
+        for (const auto& sc : scorer.scores())
+        {
+            INFO("onset error " << sc.onsetErrorMs << " ms");
+            CHECK(sc.timing == (shift > 0.1 ? NoteScore::Timing::Late : NoteScore::Timing::OnTime));
+            CHECK(std::abs(sc.onsetErrorMs - shift * 1000.0) < 45.0);   // detector onset latency is compensated
+            CHECK(sc.pitch == NoteScore::Pitch::InTune);
+        }
+        proc.setPlayHead(nullptr);
+    }
+}
+
+// ================================================================================================
+// Integration: the full "Load Vocal -> ANALYZE VOCAL -> notes -> visible" path through the real
+// editor, reproducing Dan's first Logic session (late vocal entry at 15 s, melody up to G5,
+// 120 BPM, host stopped at bar 1, default vocal range C3-C5). Synthetic audio only.
+// ================================================================================================
+namespace {
+
+std::vector<testsig::MelodyNote> lateEntryMelody()
+{
+    const int mel[] = { 60, 62, 64, 67, 69, 72, 74, 76, 79, 76, 74, 72, 69, 67, 64, 62 };
+    std::vector<testsig::MelodyNote> notes;
+    for (int i = 0; i < 16; ++i) notes.push_back({ 15.0 + 0.5 * i, 0.45, mel[i] });
+    return notes;
+}
+
+juce::File integrationDir()
+{
+    // Folder and file names with spaces and a leading digit, like "0 Lead Vocals.m4a" inside
+    // a Logic project's "Audio Files" folder.
+    auto d = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                 .getChildFile("Pitch Lane CI Project " + juce::String(juce::Time::currentTimeMillis()))
+                 .getChildFile("Audio Files");
+    d.createDirectory();
+    return d;
+}
+
+void setParam(PitchLaneProcessor& proc, const char* id, float v)
+{
+    auto* p = proc.getApvts().getParameter(id);
+    p->setValueNotifyingHost(p->convertTo0to1(v));
+}
+
+juce::TextButton* findButton(juce::Component& root, const juce::String& text)
+{
+    for (auto* c : root.getChildren())
+        if (auto* b = dynamic_cast<juce::TextButton*>(c); b != nullptr && b->getButtonText() == text) return b;
+    return nullptr;
+}
+
+struct StoppedHost
+{
+    PitchLaneProcessor proc;
+    FakePlayHead ph;
+    juce::AudioBuffer<float> buf { 2, 512 };
+    juce::MidiBuffer midi;
+    StoppedHost()
+    {
+        proc.setPlayConfigDetails(2, 2, 44100.0, 512);
+        proc.prepareToPlay(44100.0, 512);
+        ph.playing = false;   // Logic stopped at the project start (bar 1)
+        ph.time = 0.0;
+        ph.bpm = 120.0;
+        ph.num = 4;
+        proc.setPlayHead(&ph);
+        block();
+    }
+    void block()
+    {
+        buf.clear();
+        proc.processBlock(buf, midi);
+    }
+};
+
+struct EditorRun
+{
+    std::unique_ptr<juce::AudioProcessorEditor> ed;
+    PitchLaneEditor* pe = nullptr;
+    PitchLaneProcessor& proc;
+    explicit EditorRun(PitchLaneProcessor& p) : proc(p)
+    {
+        ed.reset(p.createEditorAndMakeActive());
+        pe = dynamic_cast<PitchLaneEditor*>(ed.get());
+        ed->setSize(PitchLaneEditor::kDefaultW, PitchLaneEditor::kDefaultH);
+        for (int i = 0; i < 4; ++i) pe->refreshForTest();
+    }
+    ~EditorRun()
+    {
+        ed.reset();
+        proc.editorBeingDeleted(nullptr);
+    }
+    /** ANALYZE VOCAL, then pump the message loop (background thread -> AsyncUpdater ->
+        processor -> editor timer) until the editor has handled the outcome. */
+    bool analyzeAndWait(double timeoutSec = 120.0)
+    {
+        const auto serial = proc.getLastAnalysis().serial;
+        pe->startAnalysis();
+        const double t0 = juce::Time::getMillisecondCounterHiRes();
+        bool sawProgressCard = false;
+        while (juce::Time::getMillisecondCounterHiRes() - t0 < timeoutSec * 1000.0)
+        {
+            if (proc.getAnalysis().isRunning() && !sawProgressCard)
+            {
+                // Progress UI while running: CANCEL + % on the header button.
+                sawProgressCard = findButton(*pe, "ANALYZE VOCAL") == nullptr;
+            }
+            juce::MessageManager::getInstance()->runDispatchLoopUntil(20);
+            pe->refreshForTest();
+            if (proc.getLastAnalysis().serial != serial && !proc.getAnalysis().isRunning()) break;
+        }
+        pe->refreshForTest();
+        pe->refreshForTest();
+        return proc.getLastAnalysis().serial != serial;
+    }
+};
+
+juce::File useTempLog()
+{
+    // Tests never write to the user's real log.
+    const auto logFile = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("pitchlane-test.log");
+#if !JUCE_WINDOWS
+    ::setenv("PITCHLANE_LOG_FILE", logFile.getFullPathName().toRawUTF8(), 1);
+#endif
+    return logFile;
+}
+
+void checkLoadAnalyzeFit(const juce::File& vocal, double refOffsetMs)
+{
+    INFO("file: " << vocal.getFullPathName() << ", offset " << refOffsetMs << " ms");
+    const auto logFile = useTempLog();
+    logFile.deleteFile();
+    StoppedHost host;
+    if (refOffsetMs != 0.0) setParam(host.proc, params::refOffset, static_cast<float>(refOffsetMs));
+    EditorRun run(host.proc);
+    auto& roll = run.pe->getRoll();
+    CHECK(!run.pe->getGoToNotesButton().isVisible());
+
+    // 1. Load Vocal (same code path as the file chooser / drag and drop).
+    CHECK(run.pe->loadVocalFile(vocal));
+    // 2. ANALYZE VOCAL on the background thread.
+    const double t0 = juce::Time::getMillisecondCounterHiRes();
+    CHECK(run.analyzeAndWait());
+    const double secs = (juce::Time::getMillisecondCounterHiRes() - t0) / 1000.0;
+    const auto& outcome = host.proc.getLastAnalysis();
+    CHECK(outcome.status == AnalysisManager::Status::Finished);
+
+    // 3. Notes landed in the processor state (the model the audio-side scorer / roll use).
+    const auto notes = host.proc.getReference().getNotes();
+    int active = 0, activeHi = 0;
+    double firstActive = -1.0;
+    for (const auto& n : notes)
+        if (!n.muted())
+        {
+            ++active;
+            activeHi = std::max(activeHi, n.pitch);
+            if (firstActive < 0.0) firstActive = n.start;
+        }
+    std::cout << "    integration: " << vocal.getFileName() << ": " << notes.size() << " notes, " << active
+              << " active, first active " << firstActive << " s, highest " << activeHi << ", analysis "
+              << secs << " s (decode " << outcome.decodeMs << " ms, analyze " << outcome.analyzeMs << " ms)\n";
+    CHECK(notes.size() >= 14);
+    CHECK(active >= 14);
+    CHECK_NEAR(firstActive, 15.0, 0.08);   // the low start of the run is kept (not muted as harmony)
+    CHECK_EQ(activeHi, 79);                 // reaches G5
+    CHECK_EQ(host.proc.getReference().getSourcePath(), vocal.getFullPathName());
+
+    // 4. Clear status, never a silent grid.
+    const auto status = run.pe->getStatusMessage();
+    INFO("status: " << status);
+    CHECK(status.contains(juce::String(notes.size()) + " notes found"));
+    CHECK(run.pe->getStatusKind() == PitchLaneEditor::ToastKind::Success);
+    CHECK(status.contains("showing bar"));
+    CHECK(run.pe->getGoToNotesButton().isVisible());
+    CHECK(roll.getNotice().isEmpty());
+
+    // 5. Auto-fit: the view (host stopped at 0) moved to the notes and shows them.
+    const double firstSong = firstActive + refOffsetMs * 0.001;
+    const double start = roll.getViewStart(), span = roll.getViewSpan();
+    std::cout << "    integration: view " << start << " s + " << span << " s, pitch rows "
+              << roll.visiblePitchRange().first << ".." << roll.visiblePitchRange().second << ", "
+              << roll.numNotesInView() << " notes in view, range "
+              << host.proc.getApvts().getRawParameterValue(params::lowNote)->load() << ".."
+              << host.proc.getApvts().getRawParameterValue(params::highNote)->load() << "\n";
+    CHECK(start <= firstSong);
+    CHECK(start + span > firstSong + 4.0);
+    CHECK(start > firstSong - 2.5);            // the bar line before the entry, not bar 1
+    CHECK_NEAR(span, 16.0, 0.51);              // 8 bars at 120 BPM
+    CHECK(!roll.getFollow());
+    CHECK(roll.numNotesInView() >= 14);
+    // Vocal range was still the default (C3-C5): expanded automatically to cover G5.
+    const int lo = juce::roundToInt(host.proc.getApvts().getRawParameterValue(params::lowNote)->load());
+    const int hi = juce::roundToInt(host.proc.getApvts().getRawParameterValue(params::highNote)->load());
+    CHECK(lo <= 60);
+    CHECK(hi >= 79);
+    const auto vis = roll.visiblePitchRange();
+    CHECK(vis.first <= 60);
+    CHECK(vis.second >= 79);
+
+    // The roll keeps showing them (timer ticks with the transport still stopped at 0).
+    for (int i = 0; i < 30; ++i)
+    {
+        host.block();
+        run.pe->refreshForTest();
+    }
+    CHECK(roll.numNotesInView() >= 14);
+    const auto img = run.ed->createComponentSnapshot(run.ed->getLocalBounds(), true, 1.0f);
+    CHECK_EQ(img.getWidth(), PitchLaneEditor::kDefaultW);
+
+    // 6. Diagnostics log.
+    const auto logText = logFile.loadFileAsString();
+    std::cout << "    log: " << logText.fromLastOccurrenceOf("[analysis] done", true, false).upToFirstOccurrenceOf("\n", false, false) << "\n";
+    CHECK(logText.contains("[load] vocal chosen: \"" + vocal.getFullPathName() + "\""));
+    CHECK(logText.contains("[analysis] decoded"));
+    CHECK(logText.contains("[analysis] done in"));
+    CHECK(logText.contains("[view] auto-fit"));
+}
+
+} // namespace
+
+TEST_CASE("Integration: Load Vocal -> analysis -> notes -> auto-fit (stereo WAV, late entry, host stopped)")
+{
+    const auto dir = integrationDir();
+    const auto wavFile = dir.getChildFile("0 Lead Vocals Test.wav");
+    const auto audio = testsig::melody(44100.0, 26.0, lateEntryMelody());
+    juce::WavAudioFormat wav;
+    CHECK(writeStereo(wav, wavFile, 44100.0, 16, audio));
+    checkLoadAnalyzeFit(wavFile, 0.0);
+    // Reference offset +2 s: notes (and the fit) move 2 s later on the song timeline.
+    checkLoadAnalyzeFit(wavFile, 2000.0);
+    dir.getParentDirectory().deleteRecursively();
+}
+
+#if JUCE_MAC
+TEST_CASE("Integration (macOS): stereo AAC M4A \"0 Lead Vocals Test.m4a\" -> analysis -> notes visible after auto-fit")
+{
+    const auto dir = integrationDir();
+    const auto src = dir.getChildFile("src.wav");
+    const auto m4a = dir.getChildFile("0 Lead Vocals Test.m4a");
+    const auto audio = testsig::melody(44100.0, 26.0, lateEntryMelody());
+    juce::WavAudioFormat wav;
+    CHECK(writeStereo(wav, src, 44100.0, 16, audio));
+    CHECK(runTool({ "/usr/bin/afconvert", "-f", "m4af", "-d", "aac", src.getFullPathName(), m4a.getFullPathName() }));
+    CHECK(m4a.existsAsFile());
+    {
+        AnalysisManager am;
+        juce::AudioFormatManager& fm = am.getFormats();
+        std::unique_ptr<juce::AudioFormatReader> r(fm.createReaderFor(m4a));
+        CHECK(r != nullptr);
+        if (r != nullptr) CHECK_EQ(static_cast<int>(r->numChannels), 2);   // stereo AAC
+    }
+    checkLoadAnalyzeFit(m4a, 0.0);
+    dir.getParentDirectory().deleteRecursively();
+}
+#endif
+
+TEST_CASE("Integration: zero notes / unreadable file show a visible error (never a silent empty grid)")
+{
+    useTempLog();
+    const auto dir = integrationDir();
+    StoppedHost host;
+    EditorRun run(host.proc);
+
+    // Missing file: rejected at load with a reason.
+    CHECK(!run.pe->loadVocalFile(dir.getChildFile("9 Missing Take.wav")));
+    CHECK(run.pe->getStatusKind() == PitchLaneEditor::ToastKind::Error);
+    CHECK(run.pe->getStatusMessage().contains("File not found"));
+
+    // Silent file: analysis runs, finds nothing, says so in the hint bar and on the roll.
+    const auto silent = dir.getChildFile("1 Silent Vocal.wav");
+    juce::WavAudioFormat wav;
+    CHECK(writeStereo(wav, silent, 44100.0, 16, std::vector<float>(44100 * 3, 0.f)));
+    CHECK(run.pe->loadVocalFile(silent));
+    CHECK(run.analyzeAndWait());
+    CHECK(host.proc.getLastAnalysis().status == AnalysisManager::Status::Failed);
+    const auto msg = run.pe->getStatusMessage();
+    INFO("status: " << msg);
+    CHECK(msg.startsWith("No notes found in 1 Silent Vocal.wav"));
+    CHECK(run.pe->getStatusKind() == PitchLaneEditor::ToastKind::Error);
+    CHECK(run.pe->getRoll().getNotice() == msg);
+    CHECK(host.proc.getReference().getNotes().empty());
+    for (int i = 0; i < 20; ++i) run.pe->refreshForTest();
+    CHECK(run.pe->getStatusMessage() == msg);   // sticky until dismissed / next action
+
+    // Damaged file: "Analysis failed: ..." with the reason.
+    const auto bad = dir.getChildFile("2 Broken.wav");
+    bad.replaceWithText("RIFF not really a wave file");
+    CHECK(run.pe->loadVocalFile(bad));
+    CHECK(run.analyzeAndWait());
+    CHECK(run.pe->getStatusMessage().startsWith("Analysis failed:"));
+    CHECK(run.pe->getRoll().getNotice().isNotEmpty());
+    dir.getParentDirectory().deleteRecursively();
+}
+
+TEST_CASE("Integration: custom vocal range is not overwritten; the editor offers to expand it")
+{
+    useTempLog();
+    StoppedHost host;
+    setParam(host.proc, params::lowNote, 50.f);
+    setParam(host.proc, params::highNote, 74.f);
+    host.proc.getReference().setNotes({ { 20.0, 0.5, 64 }, { 20.5, 0.5, 79 }, { 21.0, 0.5, 67 } }, false);
+    EditorRun run(host.proc);   // reopened with notes out of view -> jumps to them once
+    auto& roll = run.pe->getRoll();
+    CHECK(roll.getViewStart() > 17.0);
+    CHECK(roll.numNotesInView() >= 2);
+    CHECK_EQ(juce::roundToInt(host.proc.getApvts().getRawParameterValue(params::highNote)->load()), 74);
+    const auto action = run.pe->getStatusActionText();
+    INFO("action: " << action << " status: " << run.pe->getStatusMessage());
+    CHECK(action.startsWith("Expand range to"));
+    if (auto* b = findButton(*run.pe, action); b != nullptr && b->onClick) b->onClick();
+    CHECK(juce::roundToInt(host.proc.getApvts().getRawParameterValue(params::highNote)->load()) >= 79);
+    CHECK_EQ(juce::roundToInt(host.proc.getApvts().getRawParameterValue(params::lowNote)->load()), 50);
+    CHECK_EQ(roll.numNotesInView(), 3);
+}
+
+TEST_CASE("UI: status dot = green playing / amber stopped / grey no host info, with tooltips")
+{
+    using ui::HostLink;
+    CHECK(ui::hostLinkState(false, true, true, true) == HostLink::SyncOff);
+    CHECK(ui::hostLinkState(true, false, true, false) == HostLink::NoHostInfo);
+    CHECK(ui::hostLinkState(true, true, false, true) == HostLink::NoTimeline);
+    CHECK(ui::hostLinkState(true, true, true, false) == HostLink::Stopped);
+    CHECK(ui::hostLinkState(true, true, true, true) == HostLink::Playing);
+    CHECK(ui::hostLinkTooltip(HostLink::Stopped).contains("Amber"));
+    CHECK(ui::hostLinkTooltip(HostLink::NoHostInfo).contains("not sending audio"));
+
+    // Never processed a block (Logic stopped, track not selected): grey, not amber.
+    {
+        PitchLaneProcessor proc;
+        EditorRun run(proc);
+        for (int i = 0; i < 8; ++i) run.pe->refreshForTest();
+        CHECK(run.pe->getStatusDot().getState() == StatusDot::State::NoInfo);
+        CHECK(run.pe->getStatusDot().getTooltip().contains("Grey"));
+    }
+    StoppedHost host;
+    EditorRun run(host.proc);
+    auto tick = [&] { for (int i = 0; i < 7; ++i) run.pe->refreshForTest(); };
+    host.block();
+    tick();
+    CHECK(run.pe->getStatusDot().getState() == StatusDot::State::Stopped);   // amber
+    host.ph.playing = true;
+    host.block();
+    tick();
+    CHECK(run.pe->getStatusDot().getState() == StatusDot::State::Playing);   // green
+    juce::Thread::sleep(1100);   // no audio for > 1 s: the host is not telling us anything
+    tick();
+    CHECK(run.pe->getStatusDot().getState() == StatusDot::State::NoInfo);
+    setParam(host.proc, params::hostSync, 0.f);
+    host.block();
+    tick();
+    CHECK(run.pe->getStatusDot().getState() == StatusDot::State::Off);
+}
+
+TEST_CASE("UI: planTimeFit / planVocalRange")
+{
+    TempoMap tm;   // 120 BPM 4/4
+    auto f = ui::planTimeFit(tm, 15.0);
+    CHECK_EQ(f.bar, 8);
+    CHECK_NEAR(f.start, 14.0, 1e-9);
+    CHECK_NEAR(f.span, 16.0, 1e-9);
+    f = ui::planTimeFit(tm, 16.0);   // right on bar 9: half a beat of lead-in
+    CHECK_EQ(f.bar, 9);
+    CHECK_NEAR(f.start, 15.75, 1e-9);
+    tm.setConstant(60.0, 4, 4);      // 8 bars = 32 s -> clamped to 30 s
+    f = ui::planTimeFit(tm, 40.0);
+    CHECK_NEAR(f.span, 30.0, 1e-9);
+    CHECK(f.start <= 40.0);
+
+    auto r = ui::planVocalRange(48, 72, 55, 79, true);
+    CHECK(r.needed);
+    CHECK(r.automatic);
+    CHECK_EQ(r.lo, 53);
+    CHECK_EQ(r.hi, 81);
+    r = ui::planVocalRange(50, 74, 55, 79, false);
+    CHECK(r.needed);
+    CHECK(!r.automatic);
+    CHECK_EQ(r.lo, 50);
+    CHECK_EQ(r.hi, 81);
+    r = ui::planVocalRange(48, 72, 55, 70, true);
+    CHECK(!r.needed);
+}
+
+TEST_CASE("Integration: optional local files through the editor path via PITCHLANE_EXTRA_AUDIO (not in CI)")
+{
+    // PITCHLANE_EXTRA_AUDIO=/path/0\ Lead\ Vocals.wav PitchLaneTests: Load Vocal -> analysis ->
+    // auto-fit through the real editor with the host stopped at bar 1, printing what the user sees.
+    const auto list = juce::SystemStats::getEnvironmentVariable("PITCHLANE_EXTRA_AUDIO", {});
+    if (list.isEmpty()) return;
+    for (const auto& path : juce::StringArray::fromTokens(list, ":", {}))
+    {
+        const juce::File f(path);
+        StoppedHost host;
+        if (!host.proc.getAnalysis().canOpen(f)) continue;
+        EditorRun run(host.proc);
+        CHECK(run.pe->loadVocalFile(f));
+        CHECK(run.analyzeAndWait(300.0));
+        auto& roll = run.pe->getRoll();
+        const auto vis = roll.visiblePitchRange();
+        std::printf("    %s: status \"%s\"; view %.2f s + %.2f s, rows %d..%d, %d notes in view, range %d..%d\n",
+                    f.getFileName().toRawUTF8(), run.pe->getStatusMessage().toRawUTF8(), roll.getViewStart(),
+                    roll.getViewSpan(), vis.first, vis.second, roll.numNotesInView(),
+                    juce::roundToInt(host.proc.getApvts().getRawParameterValue(params::lowNote)->load()),
+                    juce::roundToInt(host.proc.getApvts().getRawParameterValue(params::highNote)->load()));
+        CHECK(roll.numNotesInView() > 0);
+    }
+}
